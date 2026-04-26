@@ -8,6 +8,14 @@ New Workbench Agent is a VS Code extension for setting up AI-assisted developmen
 
 ---
 
+## Critical Project Discussions
+
+Use [GitHub Discussions](https://github.com/b0yblake/New-Workbench-Agent/discussions) as the primary channel for critical project topics, roadmap decisions, feature proposals, implementation direction, and release planning.
+
+If a change affects the extension behavior, Claude resource setup, supported AI tools, installation flow, or public documentation, open or join a discussion before finalizing the change.
+
+---
+
 ## ✨ Features
 
 - 🎨 **Visual Agent Manager** - Select tools, departments, and agents from a focused UI.
@@ -315,6 +323,7 @@ Use the Claude Resource Manager to install layered Claude Code context files, in
 
 Found a bug or have a feature request?
 
+- **Critical project discussions**: [GitHub Discussions](https://github.com/b0yblake/New-Workbench-Agent/discussions)
 - 🐛 **Report bugs**: [GitHub Issues](https://github.com/b0yblake/New-Workbench-Agent/issues)
 - 💡 **Suggest features**: [GitHub Discussions](https://github.com/b0yblake/New-Workbench-Agent/discussions)
 - 📖 **Documentation**: [GitHub Wiki](https://github.com/b0yblake/New-Workbench-Agent/wiki)
