@@ -8,6 +8,7 @@ import { removeAgentsCommand } from './commands/removeAgents';
 import { previewAgentCommand, setExtensionPath } from './commands/previewAgent';
 import { toggleFavoriteCommand } from './commands/toggleFavorite';
 import { initClaudeResourceCommand } from './commands/initClaudeResource';
+import { openObsidianGraphCommand } from './commands/openObsidianGraph';
 import { InstalledAgentsProvider } from './providers/InstalledAgentsProvider';
 import { AvailableAgentsProvider } from './providers/AvailableAgentsProvider';
 import { ConfigService } from './services/ConfigService';
@@ -90,6 +91,12 @@ function registerCommands(
     vscode.commands.registerCommand(COMMANDS.INIT_CLAUDE_RESOURCE, () => {
       logger.info('Opening Claude resource initializer');
       initClaudeResourceCommand(context.extensionUri);
+    }),
+
+    // Graph Obsidian
+    vscode.commands.registerCommand(COMMANDS.GRAPH_OBSIDIAN, async () => {
+      logger.info('Opening Graph Obsidian');
+      await openObsidianGraphCommand(context.extensionUri);
     }),
 
     // Refresh Agents

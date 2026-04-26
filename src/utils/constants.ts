@@ -6,6 +6,7 @@ export const COMMANDS = {
   QUICK_INIT: 'agentkit.quickInit',
   INIT_AGENTS: 'agentkit.initAgents',
   INIT_CLAUDE_RESOURCE: 'agentkit.initClaudeResource',
+  GRAPH_OBSIDIAN: 'agentkit.graphObsidian',
   REFRESH_AGENTS: 'agentkit.refreshAgents',
   UPDATE_AGENTS: 'agentkit.updateAgents',
   REMOVE_AGENTS: 'agentkit.removeAgents',
