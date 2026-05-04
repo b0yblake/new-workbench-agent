@@ -1,9 +1,9 @@
 (function () {
   const vscode = acquireVsCodeApi();
   const defaultPhysics = {
-    centerForce: 0.05,
-    linkForce: 0.03,
-    linkLength: 180,
+    centerForce: 0.01,
+    linkForce: 0.02,
+    linkLength: 50,
     lineThickness: 2,
   };
   const CODE_FILE_EXTENSIONS = new Set([

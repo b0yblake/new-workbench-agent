@@ -17,7 +17,7 @@ const CLAUDE_RESOURCES: ClaudeResourceDefinition[] = [
   {
     id: 'claude-md',
     fileName: 'CLAUDE.md',
-    templateName: 'CLAUDE.MD',
+    templateName: 'CLAUDE.md',
     description: 'Root-level Claude Code project instructions.'
   },
   {
