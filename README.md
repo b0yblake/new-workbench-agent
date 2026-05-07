@@ -1,17 +1,23 @@
-# 🐙 New Workbench Agent for VS Code
+<p align="center"><img src="nwa-agent.png" alt="" width="300px" height="auto"></p>
 
-> **A visual interface for generating, workflow creating, and managing AI agent across VS Code, Claude Code, Cursor, GitHub Copilot, Aider, and more.**
+<div align="center">
+<br />
 
-<p align="center"><img src="nwa-agent.png" alt="" width="450px" height="auto"></p>
+![Last Update](https://img.shields.io/github/last-commit/b0yblake/New-Workbench-Agent?label=Last%20Update&style=flat-square)
+[![VScode](https://img.shields.io/badge/Visual%20Studio%20Code-007ACC?style=flat-square&logo=visualstudiocode&logoColor=white)](https://code.visualstudio.com/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-22+-5FA04E?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Follow on X](https://img.shields.io/badge/Follow%20on-X-000000?style=flat-square&logo=x)](https://x.com/lichhuuhuu)
+</div>
 
-**A Human-Controlled AI Workbench for Developers, is not built to replace developers.**
+> **Not just a fancy agents tool! <br> Its a Human-Controlled AI Workbench for Developers, is not built to replace developers. Visual interface for generating, workflow creating, and managing AI agent across VS Code, Claude Code, Cursor, GitHub Copilot, Aider, and more.**
 <br/>It is built to give developers full control over how multiple agents think, work, adapt, and deliver.
 
 ## ✨ Why does this repo exist?
 
 | Pain Point | How NWA Agent Solves It | Value for Developers |
 |---|---|---|
-| 🤖 Too many multi-agent tools are shallow | NWA Agent brings agents directly into VS Code | Developers can work with AI inside their real coding environment, not through a disconnected automation layer. |
+| 🤖 Too many multi-agent tools are shallow | As extension VSCode, total fully customize | Developers can work with AI inside their real coding environment, not through a disconnected automation layer. |
 | 🔒 Most workflows are rigid and hard to customize | Modular agent configuration and reusable resources | Teams can create, adjust, and reuse specialized agents based on each project’s needs. |
 | 🏃 Agents often run from start to finish like a black box | Human-in-the-loop workflow control | Developers can stay involved, guide the process, and make decisions at the right moments. |
 | 🔁 It is hard to change direction while an agent is running | Mid-flow customization and intervention | Developers can pause, refine instructions, switch context, or adjust the agent’s role without restarting everything. |
