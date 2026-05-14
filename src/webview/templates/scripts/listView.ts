@@ -17,6 +17,7 @@ function renderListView() {
 
   updateModeControls();
   renderTaskFilterChips();
+  renderDeleteConfirmDialog();
   bindTaskItemList();
 }
 
@@ -197,7 +198,7 @@ function bindTaskItemList() {
       if (typeof event.stopImmediatePropagation === 'function') {
         event.stopImmediatePropagation();
       }
-      deleteTaskItem(button.dataset.itemId, button.dataset.itemType);
+      openDeleteConfirmDialog(button.dataset.itemId, button.dataset.itemType);
     };
   });
 }
@@ -223,6 +224,96 @@ function openTaskFilterDialog() {
 function closeTaskFilterDialog() {
   filterDialogState.isOpen = false;
   renderTaskFilterDialog();
+}
+
+function openDeleteConfirmDialog(id, type) {
+  if (!id || !type) {
+    return;
+  }
+
+  deleteConfirmState.isOpen = true;
+  deleteConfirmState.id = id;
+  deleteConfirmState.type = type;
+  deleteConfirmState.isDeleting = false;
+  renderDeleteConfirmDialog();
+}
+
+function closeDeleteConfirmDialog() {
+  if (deleteConfirmState.isDeleting) {
+    return;
+  }
+
+  deleteConfirmState.isOpen = false;
+  deleteConfirmState.id = '';
+  deleteConfirmState.type = '';
+  renderDeleteConfirmDialog();
+}
+
+function renderDeleteConfirmDialog() {
+  const existingDialog = document.getElementById('taskDeleteConfirmDialog');
+  if (!deleteConfirmState.isOpen) {
+    if (existingDialog) {
+      existingDialog.remove();
+    }
+    return;
+  }
+
+  const itemId = deleteConfirmState.id || '';
+  const itemType = deleteConfirmState.type || 'task';
+  const dialogHtml = \`
+    <div class="delete-dialog-backdrop" id="taskDeleteConfirmDialog">
+      <div class="delete-dialog" role="dialog" aria-modal="true" aria-labelledby="taskDeleteConfirmTitle">
+        <div class="delete-dialog-header">
+          <div>
+            <h2 id="taskDeleteConfirmTitle">Remove \${escapeHtml(itemTypeText(itemType))}</h2>
+          </div>
+        </div>
+        <div class="delete-dialog-body">
+          <p>Remove \${escapeHtml(itemTypeText(itemType))} <strong>\${escapeHtml(itemId)}</strong> and its task folder?</p>
+          <p class="delete-dialog-copy">This removes the generated task data from the workspace.</p>
+        </div>
+        <div class="delete-dialog-actions">
+          <button class="secondary" id="cancelTaskDeleteDialogBtn" type="button" \${deleteConfirmState.isDeleting ? 'disabled' : ''}>Cancel</button>
+          <button class="danger" id="removeTaskDeleteDialogBtn" type="button" \${deleteConfirmState.isDeleting ? 'disabled' : ''}>Remove</button>
+        </div>
+      </div>
+    </div>
+  \`;
+
+  if (existingDialog) {
+    existingDialog.outerHTML = dialogHtml;
+  } else {
+    document.body.insertAdjacentHTML('beforeend', dialogHtml);
+  }
+
+  bindDeleteConfirmDialog();
+}
+
+function bindDeleteConfirmDialog() {
+  const dialog = document.getElementById('taskDeleteConfirmDialog');
+  const cancelButton = document.getElementById('cancelTaskDeleteDialogBtn');
+  const removeButton = document.getElementById('removeTaskDeleteDialogBtn');
+
+  if (dialog) {
+    dialog.onclick = event => {
+      if (event.target === dialog) {
+        closeDeleteConfirmDialog();
+      }
+    };
+  }
+
+  if (cancelButton) {
+    cancelButton.onclick = closeDeleteConfirmDialog;
+  }
+
+  if (removeButton) {
+    removeButton.onclick = removeDeleteConfirmDialogItem;
+    setTimeout(() => removeButton.focus(), 0);
+  }
+}
+
+function removeDeleteConfirmDialogItem() {
+  deleteTaskItem(deleteConfirmState.id, deleteConfirmState.type);
 }
 
 function applyTaskFilterDialog() {
@@ -620,12 +711,9 @@ function deleteTaskItem(id, type) {
     return;
   }
 
-  const confirmed = confirm('Delete ' + itemTypeText(type) + ' ' + id + ' and its cached data?');
-  if (!confirmed) {
-    return;
-  }
-
+  deleteConfirmState.isDeleting = true;
   listMessage = 'Deleting ' + itemTypeText(type) + ' ' + id + '...';
+  renderDeleteConfirmDialog();
   renderListView();
   vscode.postMessage({
     command: 'deleteTaskItem',

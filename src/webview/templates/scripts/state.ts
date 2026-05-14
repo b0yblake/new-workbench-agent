@@ -26,6 +26,12 @@ let filterDialogState = {
   message: '',
   isError: false
 };
+let deleteConfirmState = {
+  isOpen: false,
+  id: '',
+  type: '',
+  isDeleting: false
+};
 let selectedNodeId = 'document';
 let taskState = {
   mode: currentMode,

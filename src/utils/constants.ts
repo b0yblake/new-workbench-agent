@@ -16,7 +16,12 @@ export const COMMANDS = {
   VIEW_AGENT: 'nwa.viewAgent',
   OPEN_SETTINGS: 'nwa.openSettings',
   PREVIEW_AGENT: 'nwa.previewAgent',
-  TOGGLE_FAVORITE: 'nwa.toggleFavorite'
+  TOGGLE_FAVORITE: 'nwa.toggleFavorite',
+  MEMORY_ADD: 'nwa.memory.addManualMemory',
+  MEMORY_SEARCH: 'nwa.memory.searchMemory',
+  MEMORY_SHOW: 'nwa.memory.showMemory',
+  MEMORY_CLEAR: 'nwa.memory.clearMemory',
+  MEMORY_REFRESH_TREE: 'nwa.memory.refreshTree'
 } as const;
 
 export const CONFIG_KEYS = {
@@ -33,7 +38,8 @@ export const TREE_VIEW_IDS = {
   INSTALLED: 'nwa-installed',
   AVAILABLE: 'nwa-available',
   CLAUDECONTEXT: 'nwa-claude-initial-context',
-  TASK: 'nwa-task'
+  TASK: 'nwa-task',
+  MEMORY: 'nwa-memory'
 } as const;
 
 export const GLOBAL_STATE_KEYS = {

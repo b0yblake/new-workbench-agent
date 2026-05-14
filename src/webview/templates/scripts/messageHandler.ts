@@ -37,10 +37,20 @@ window.addEventListener('message', event => {
     renderListView();
   } else if (message.command === 'taskItemDeleteComplete') {
     currentItem = null;
+    deleteConfirmState.isOpen = false;
+    deleteConfirmState.id = '';
+    deleteConfirmState.type = '';
+    deleteConfirmState.isDeleting = false;
+    renderDeleteConfirmDialog();
     applyTaskState(message.data.state);
     listMessage = 'Item deleted.';
     showView('list');
   } else if (message.command === 'taskItemDeleteFailed') {
+    deleteConfirmState.isOpen = false;
+    deleteConfirmState.id = '';
+    deleteConfirmState.type = '';
+    deleteConfirmState.isDeleting = false;
+    renderDeleteConfirmDialog();
     listMessage = message.data.message || 'Delete failed.';
     renderListView();
   } else if (message.command === 'taskDocumentUploadComplete') {

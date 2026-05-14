@@ -1,7 +1,6 @@
 import {
   DEFAULT_TASK_DOCUMENTS_FOLDER,
   JIRA_MARKDOWN_FILE_NAME,
-  PROJECT_FIGMA_FOLDER,
   PROJECT_FOLDER,
   TASK_ITEM_FOLDERS,
   TASK_ITEM_METADATA_FILE_NAME
@@ -66,13 +65,6 @@ export function getCoreSavePathSettings(taskDocumentsFolder: string): SavePathSe
       description: 'Per-item metadata file created when a task, bug, or analysis item is added.',
       value: `${PROJECT_FOLDER}/{type}/{id}/${TASK_ITEM_METADATA_FILE_NAME}`,
       defaultValue: `${PROJECT_FOLDER}/{type}/{id}/${TASK_ITEM_METADATA_FILE_NAME}`
-    },
-    {
-      id: 'figma-cache',
-      label: 'Figma cache',
-      description: 'Synced Figma file and node metadata cache.',
-      value: `${PROJECT_FIGMA_FOLDER}/{type}-{id}.json`,
-      defaultValue: `${PROJECT_FIGMA_FOLDER}/{type}-{id}.json`
     },
     {
       id: 'jira-markdown',

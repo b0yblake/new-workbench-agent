@@ -13,6 +13,13 @@ import { RemoveAgentsCommand } from './removeAgents/RemoveAgentsCommand';
 import { ToggleFavoriteCommand } from './toggleFavorite/ToggleFavoriteCommand';
 import { UpdateAgentsCommand } from './updateAgents/UpdateAgentsCommand';
 import { ViewAgentCommand } from './viewAgent/ViewAgentCommand';
+import {
+  AddManualMemoryCommand,
+  ClearMemoryCommand,
+  RefreshMemoryTreeCommand,
+  SearchMemoryCommand,
+  ShowMemoryCommand
+} from './memoryCommands';
 import { CommandDependencies, ExtensionCommand } from './types';
 
 export function registerCommands(dependencies: CommandDependencies): void {
@@ -32,7 +39,12 @@ export function registerCommands(dependencies: CommandDependencies): void {
     new ViewAgentCommand(dependencies),
     new OpenSettingsCommand(dependencies),
     new PreviewAgentCommand(dependencies),
-    new ToggleFavoriteCommand(dependencies)
+    new ToggleFavoriteCommand(dependencies),
+    new AddManualMemoryCommand(dependencies),
+    new SearchMemoryCommand(dependencies),
+    new ShowMemoryCommand(dependencies),
+    new ClearMemoryCommand(dependencies),
+    new RefreshMemoryTreeCommand(dependencies)
   ];
 
   dependencies.context.subscriptions.push(...commands.map(command => command.register()));

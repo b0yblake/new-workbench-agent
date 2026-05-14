@@ -9,8 +9,10 @@ import { createRequire } from 'module';
 import { promisify } from 'util';
 import { ConfigService } from './ConfigService';
 import { FileSystemService } from './FileSystemService';
+import { MemoryService } from '../features/memory/MemoryService';
 import { compressAgentText } from '../features/compression';
 import { WorkflowStorageService } from '../features/workflows/WorkflowStorageService';
+import { stringifyWorkflow } from '../features/workflows/yaml';
 import type { WorkflowBlock, WorkflowFile, WorkflowStepBlock, WorkflowStepType } from '../features/workflows/types';
 import { logger } from '../utils/logger';
 import {
@@ -40,7 +42,6 @@ import {
 
 const execFileAsync = promisify(execFile);
 export const PROJECT_FOLDER = '.project';
-export const PROJECT_FIGMA_FOLDER = '.project/figma';
 export const DEFAULT_TASK_DOCUMENTS_FOLDER = '.project/docs';
 const MARKITDOWN_MAX_BUFFER = 100 * 1024 * 1024;
 const FIGMA_NODE_LIST_MAX_DEPTH = 2;
@@ -52,8 +53,7 @@ const TASK_MARKDOWN_GUIDE_RELATIVE_PATH = ['webview', 'execution', 'condensed', 
 const TASK_MARKDOWN_BUNDLED_GUIDE_RELATIVE_PATH = ['execution', 'condensed', 'guide.md'];
 export const JIRA_MARKDOWN_FILE_NAME = 'jira.md';
 export const TASK_ITEM_METADATA_FILE_NAME = 'item.json';
-const FIGMA_CACHE_SCHEMA_VERSION = 1;
-const JIRA_CACHE_PREFIX = 'agentkit:jira:';
+export const TASK_ITEM_WORKFLOW_FILE_NAME = 'workflow.yaml';
 export const TASK_ITEM_FOLDERS: Record<TaskItemType, string> = {
   task: 'task',
   bug: 'task',
@@ -110,6 +110,11 @@ interface TaskItemMetadata {
   updatedAt: string;
 }
 
+interface TaskItemWorkflowSnapshot {
+  workflow: WorkflowFile;
+  source: string;
+}
+
 type TaskFeatureSummaryStatus = 'complete' | 'running' | 'failed' | 'missing' | 'pending' | 'skipped';
 
 interface TaskFeatureSummary {
@@ -128,8 +133,11 @@ export class TaskManagerService {
   private jiraConnection?: TaskJiraConnection;
   private jiraBrowserContext?: BrowserContext;
   private jiraPage?: Page;
-  private taskMarkdownContentByItem: Record<string, string> = {};
-  private taskMarkdownUpdatedAtByItem: Record<string, string> = {};
+  private memoryService?: MemoryService;
+
+  setMemoryService(service: MemoryService): void {
+    this.memoryService = service;
+  }
 
   constructor(
     configService?: ConfigService,
@@ -171,7 +179,8 @@ export class TaskManagerService {
     const documentsFolderUri = vscode.Uri.joinPath(workspaceFolder, ...documentsFolder.split('/'));
     const documents = await this.listMarkdownDocuments(workspaceFolder, documentsFolderUri);
     const documentStatus = documents.length > 0 ? 'Ready' : 'Missing';
-    const loadedFigmaConnection = currentItem ? await this.readFigmaConnection(workspaceFolder, currentItem) : undefined;
+    const isSameItem = Boolean(currentItem && this.currentItem?.id === currentItem.id && this.currentItem?.type === currentItem.type);
+    const loadedFigmaConnection = isSameItem ? this.figmaConnection : undefined;
     const loadedJiraConnection = currentItem ? await this.readJiraConnection(workspaceFolder, currentItem) : undefined;
 
     if (currentItem) {
@@ -215,13 +224,18 @@ export class TaskManagerService {
     const itemType = this.normalizeTaskItemType(request.type);
     const itemId = this.normalizeCreatedTaskItemId(request.name || request.id || '');
     const itemFolderUri = this.getTaskItemFolderUri(workspaceFolder, itemType, itemId);
+    const workflowSnapshot = request.workflowId
+      ? await this.resolveSelectedWorkflowSnapshot(request.workflowId)
+      : undefined;
 
     await vscode.workspace.fs.createDirectory(itemFolderUri);
     await vscode.workspace.fs.createDirectory(this.getProjectTypeFolderUri(workspaceFolder, itemType));
-    await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(workspaceFolder, ...PROJECT_FIGMA_FOLDER.split('/')));
     await this.writeTaskItemMetadata(workspaceFolder, itemType, itemId, request.workflowId);
+    if (workflowSnapshot) {
+      await this.writeTaskItemWorkflow(workspaceFolder, itemType, itemId, workflowSnapshot.source);
+    }
 
-    const item = await this.getTaskItem(workspaceFolder, itemType, itemId);
+    const item = await this.getTaskItem(workspaceFolder, itemType, itemId, workflowSnapshot ? [workflowSnapshot.workflow] : []);
     this.currentItem = item;
     this.figmaConnection = undefined;
     this.jiraConnection = undefined;
@@ -251,7 +265,7 @@ export class TaskManagerService {
     }
 
     this.currentItem = item;
-    this.figmaConnection = await this.readFigmaConnection(workspaceFolder, item);
+    this.figmaConnection = undefined;
     this.jiraConnection = await this.readJiraConnection(workspaceFolder, item);
 
     const state = await this.getState(TASK_TYPE_TO_MODE[item.type], {
@@ -290,10 +304,6 @@ export class TaskManagerService {
     }
     await this.deleteUriIfExists(this.getLegacyTaskItemFolderUri(workspaceFolder, item.type, item.id), {
       recursive: true,
-      useTrash: true
-    });
-    await this.deleteUriIfExists(this.getFigmaCacheUri(workspaceFolder, item.type, item.id), {
-      recursive: false,
       useTrash: true
     });
 
@@ -378,7 +388,6 @@ export class TaskManagerService {
     };
 
     this.figmaConnection = connection;
-    await this.writeFigmaConnection(workspaceFolder, item, connection);
     const state = await this.getState(TASK_TYPE_TO_MODE[item.type], {
       itemId: item.id,
       itemType: item.type
@@ -393,10 +402,6 @@ export class TaskManagerService {
     const item = await this.resolveOperationItem(workspaceFolder, request.mode || 'task', request);
 
     if (!this.figmaConnection) {
-      this.figmaConnection = await this.readFigmaConnection(workspaceFolder, item);
-    }
-
-    if (!this.figmaConnection) {
       throw new Error('Sync a Figma link before selecting nodes.');
     }
 
@@ -408,8 +413,6 @@ export class TaskManagerService {
       ...this.figmaConnection,
       selectedNodeIds
     };
-    await this.writeFigmaConnection(workspaceFolder, item, this.figmaConnection);
-
     const state = await this.getState(TASK_TYPE_TO_MODE[item.type], {
       itemId: item.id,
       itemType: item.type
@@ -423,26 +426,21 @@ export class TaskManagerService {
     const workspaceFolder = await this.requireWorkspaceFolder();
     const item = await this.resolveOperationItem(workspaceFolder, request.mode || 'task', request);
     const mode = TASK_TYPE_TO_MODE[item.type];
-    const itemKey = this.getTaskItemKey(item);
     const generatedAt = new Date().toISOString();
 
     if (request.regenerate) {
-      this.taskMarkdownContentByItem[itemKey] = await this.generateTaskMarkdown(mode, item);
-      this.taskMarkdownUpdatedAtByItem[itemKey] = generatedAt;
-      await this.writeTaskMarkdown(workspaceFolder, item, this.taskMarkdownContentByItem[itemKey]);
+      const regenerated = await this.generateTaskMarkdown(mode, item);
+      await this.writeTaskMarkdown(workspaceFolder, item, regenerated);
     }
 
-    const cachedContent = this.taskMarkdownContentByItem[itemKey] || await this.readTaskMarkdown(workspaceFolder, item);
-    let content = cachedContent;
+    let content = await this.readTaskMarkdown(workspaceFolder, item);
 
     if (!content) {
       content = await this.generateTaskMarkdown(mode, item);
-      this.taskMarkdownContentByItem[itemKey] = content;
-      this.taskMarkdownUpdatedAtByItem[itemKey] = generatedAt;
       await this.writeTaskMarkdown(workspaceFolder, item, content);
     }
 
-    const updatedAt = this.taskMarkdownUpdatedAtByItem[itemKey] || await this.getTaskMarkdownUpdatedAt(workspaceFolder, item);
+    const updatedAt = await this.getTaskMarkdownUpdatedAt(workspaceFolder, item);
     const state = await this.getState(mode, {
       itemId: item.id,
       itemType: item.type
@@ -464,11 +462,8 @@ export class TaskManagerService {
     const workspaceFolder = await this.requireWorkspaceFolder();
     const item = await this.resolveOperationItem(workspaceFolder, request.mode || 'task', request);
     const mode = TASK_TYPE_TO_MODE[item.type];
-    const itemKey = this.getTaskItemKey(item);
-    this.taskMarkdownContentByItem[itemKey] = request.content;
-    this.taskMarkdownUpdatedAtByItem[itemKey] = new Date().toISOString();
     await this.writeTaskMarkdown(workspaceFolder, item, request.content);
-    const updatedAt = this.taskMarkdownUpdatedAtByItem[itemKey] as string;
+    const updatedAt = new Date().toISOString();
     const state = await this.getState(mode, {
       itemId: item.id,
       itemType: item.type
@@ -585,7 +580,7 @@ export class TaskManagerService {
     figmaConnection?: TaskFigmaConnection,
     jiraConnection?: TaskJiraConnection
   ): 'Ready' | 'Missing' {
-    if (item && (this.taskMarkdownContentByItem[this.getTaskItemKey(item)]?.trim() || item.hasMarkdown)) {
+    if (item && item.hasMarkdown) {
       return 'Ready';
     }
 
@@ -605,13 +600,13 @@ export class TaskManagerService {
     const documentSummaries = workspaceFolder
       ? await this.getTaskMarkdownDocumentSummaries(workspaceFolder, documents)
       : [];
-    const figmaConnection = workspaceFolder ? await this.readFigmaConnection(workspaceFolder, item) : undefined;
+    const figmaConnection = this.figmaConnection;
     const jiraConnection = workspaceFolder ? await this.readJiraConnection(workspaceFolder, item) : undefined;
     const figmaNodes = this.getSelectedFigmaNodes(figmaConnection);
     const ticket = jiraConnection?.ticket;
     const guide = await this.getTaskMarkdownGuide();
 
-    return this.fillTaskMarkdownGuide(
+    let content = this.fillTaskMarkdownGuide(
       guide,
       mode,
       item,
@@ -621,6 +616,19 @@ export class TaskManagerService {
       figmaNodes,
       ticket
     );
+
+    if (this.memoryService) {
+      const memoryContext = await this.memoryService.getRelevantContext({
+        keywords: [item.id, mode],
+        jiraKeys: ticket?.key ? [ticket.key] : undefined,
+        figmaNodeIds: figmaConnection?.selectedNodeIds
+      });
+      if (memoryContext) {
+        content = `${content}\n\n${memoryContext}`;
+      }
+    }
+
+    return content;
   }
 
   private async getTaskMarkdownGuide(): Promise<string> {
@@ -1731,25 +1739,21 @@ export class TaskManagerService {
     await this.ensureTaskItemMetadata(workspaceFolder, itemType, itemId);
     const markdownUri = this.getTaskItemMarkdownUri(workspaceFolder, itemType, itemId);
     const jiraUri = this.getTaskItemJiraUri(workspaceFolder, itemType, itemId);
-    const figmaCacheUri = this.getFigmaCacheUri(workspaceFolder, itemType, itemId);
     const folderStat = await this.statUri(folderUri);
     const markdownStat = await this.statUri(markdownUri);
     const jiraStat = await this.statUri(jiraUri);
-    const figmaStat = await this.statUri(figmaCacheUri);
-    const updatedAt = this.getLatestStatDate([folderStat, markdownStat, jiraStat, figmaStat]);
+    const updatedAt = this.getLatestStatDate([folderStat, markdownStat, jiraStat]);
     const metadata = await this.readTaskItemMetadata(workspaceFolder, itemType, itemId);
     const workflow = workflows.find(candidate => candidate.id === metadata?.workflowId);
-    const inMemoryMarkdownLength = markdownStat ? 0 : this.taskMarkdownContentByItem[`${itemType}:${itemId}`]?.length || 0;
     const summary = this.getTaskItemSummary(
       metadata?.workflowId,
       workflow,
       {
         hasJira: Boolean(jiraStat),
         hasMarkdown: Boolean(markdownStat),
-        hasFigmaCache: Boolean(figmaStat)
+        hasFigmaCache: false
       },
-      [markdownStat, jiraStat, figmaStat],
-      inMemoryMarkdownLength
+      [markdownStat, jiraStat]
     );
 
     return {
@@ -1758,13 +1762,13 @@ export class TaskManagerService {
       folderPath: this.getTaskItemFolderRelativePath(itemType, itemId),
       markdownPath: this.getTaskItemMarkdownRelativePath(itemType, itemId),
       jiraPath: this.getTaskItemJiraRelativePath(itemType, itemId),
-      figmaCachePath: this.getFigmaCacheRelativePath(itemType, itemId),
+      figmaCachePath: '',
       workflowId: metadata?.workflowId,
       createdAt: folderStat ? new Date(folderStat.ctime).toISOString() : undefined,
       updatedAt: updatedAt ? updatedAt.toISOString() : undefined,
       hasJira: Boolean(jiraStat),
       hasMarkdown: Boolean(markdownStat),
-      hasFigmaCache: Boolean(figmaStat),
+      hasFigmaCache: false,
       summary
     };
   }
@@ -1773,8 +1777,7 @@ export class TaskManagerService {
     workflowId: string | undefined,
     workflow: WorkflowFile | undefined,
     availability: { hasJira: boolean; hasMarkdown: boolean; hasFigmaCache: boolean },
-    contentStats: Array<vscode.FileStat | undefined>,
-    inMemoryContentLength = 0
+    contentStats: Array<vscode.FileStat | undefined>
   ): TaskItemSummary {
     const features = workflow
       ? this.getWorkflowFeatureSummaries(workflow.blocks, availability)
@@ -1804,7 +1807,7 @@ export class TaskManagerService {
     const missingWorkflowWarning = workflowId && !workflow ? 'Selected workflow was not found.' : undefined;
 
     return {
-      usageTokens: this.estimateUsageTokens(contentStats, inMemoryContentLength),
+      usageTokens: this.estimateUsageTokens(contentStats),
       progressPercent,
       completedFeatureCount,
       totalFeatureCount,
@@ -1903,18 +1906,14 @@ export class TaskManagerService {
       .replace(/\b\w/g, match => match.toUpperCase());
   }
 
-  private estimateUsageTokens(
-    stats: Array<vscode.FileStat | undefined>,
-    inMemoryContentLength = 0
-  ): number {
+  private estimateUsageTokens(stats: Array<vscode.FileStat | undefined>): number {
     const byteCount = stats.reduce((total, stat) => total + (stat?.size || 0), 0);
-    const charCount = byteCount + inMemoryContentLength;
 
-    if (charCount <= 0) {
+    if (byteCount <= 0) {
       return 0;
     }
 
-    return Math.max(1, Math.ceil(charCount / 4));
+    return Math.max(1, Math.ceil(byteCount / 4));
   }
 
   private getLatestStatDate(stats: Array<vscode.FileStat | undefined>): Date | undefined {
@@ -2046,6 +2045,48 @@ export class TaskManagerService {
     await vscode.workspace.fs.writeFile(metadataUri, Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`, 'utf8'));
   }
 
+  private async resolveSelectedWorkflowSnapshot(workflowId: string): Promise<TaskItemWorkflowSnapshot> {
+    const workflows = await this.workflowStorage.listWorkflows();
+    const workflow = workflows.find(candidate => candidate.id === workflowId);
+
+    if (!workflow) {
+      throw new Error('Selected workflow was not found. Refresh Task Manager and try again.');
+    }
+
+    return {
+      workflow,
+      source: await this.readWorkflowSource(workflow)
+    };
+  }
+
+  private async readWorkflowSource(workflow: WorkflowFile): Promise<string> {
+    const workflowsDir = this.workflowStorage.getWorkflowsDir();
+
+    if (workflowsDir && workflow.fileName) {
+      try {
+        const source = await fs.readFile(path.join(workflowsDir, workflow.fileName), 'utf8');
+        return source.endsWith('\n') ? source : `${source}\n`;
+      } catch (error) {
+        logger.warn(`Unable to read workflow source ${workflow.fileName}: ${(error as Error).message}`);
+      }
+    }
+
+    return stringifyWorkflow(workflow);
+  }
+
+  private async writeTaskItemWorkflow(
+    workspaceFolder: vscode.Uri,
+    type: TaskItemType,
+    id: string,
+    content: string
+  ): Promise<void> {
+    const workflowUri = this.getTaskItemWorkflowUri(workspaceFolder, type, id);
+    const normalizedContent = content.endsWith('\n') ? content : `${content}\n`;
+
+    await vscode.workspace.fs.createDirectory(this.getTaskItemFolderUri(workspaceFolder, type, id));
+    await vscode.workspace.fs.writeFile(workflowUri, Buffer.from(normalizedContent, 'utf8'));
+  }
+
   private async migrateLegacyTaskMarkdown(
     workspaceFolder: vscode.Uri,
     type: TaskItemType,
@@ -2080,7 +2121,6 @@ export class TaskManagerService {
 
     try {
       const content = Buffer.from(await vscode.workspace.fs.readFile(markdownUri)).toString('utf8');
-      this.taskMarkdownContentByItem[this.getTaskItemKey(item)] = content;
       return content;
     } catch {
       return undefined;
@@ -2093,7 +2133,6 @@ export class TaskManagerService {
     content: string
   ): Promise<void> {
     const { compressed, before, after, savedPercent } = compressAgentText(content);
-    this.taskMarkdownContentByItem[this.getTaskItemKey(item)] = compressed;
     if (before > after) {
       logger.debug(`Compressed task markdown for ${item.id}: ${before} → ${after} chars (-${savedPercent.toFixed(1)}%)`);
     }
@@ -2103,17 +2142,13 @@ export class TaskManagerService {
   }
 
   private async ensureTaskMarkdownExists(workspaceFolder: vscode.Uri, item: TaskManagerItem): Promise<void> {
-    const itemKey = this.getTaskItemKey(item);
-    const existingContent = this.taskMarkdownContentByItem[itemKey] || await this.readTaskMarkdown(workspaceFolder, item);
+    const existingContent = await this.readTaskMarkdown(workspaceFolder, item);
 
     if (existingContent?.trim()) {
       return;
     }
 
-    const generatedAt = new Date().toISOString();
     const content = await this.generateTaskMarkdown(TASK_TYPE_TO_MODE[item.type], item);
-    this.taskMarkdownContentByItem[itemKey] = content;
-    this.taskMarkdownUpdatedAtByItem[itemKey] = generatedAt;
     await this.writeTaskMarkdown(workspaceFolder, item, content);
   }
 
@@ -2126,47 +2161,6 @@ export class TaskManagerService {
     return stat ? new Date(stat.mtime).toISOString() : undefined;
   }
 
-  private async readFigmaConnection(
-    workspaceFolder: vscode.Uri,
-    item: TaskManagerItem
-  ): Promise<TaskFigmaConnection | undefined> {
-    try {
-      const cacheUri = this.getFigmaCacheUri(workspaceFolder, item.type, item.id);
-      const payload = JSON.parse(Buffer.from(await vscode.workspace.fs.readFile(cacheUri)).toString('utf8'));
-      const connection = payload.connection as TaskFigmaConnection | undefined;
-
-      if (!connection?.link || !connection.fileKey || !connection.fileName) {
-        return undefined;
-      }
-
-      return {
-        ...connection,
-        nodes: Array.isArray(connection.nodes) ? connection.nodes : [],
-        selectedNodeIds: Array.isArray(connection.selectedNodeIds) ? connection.selectedNodeIds : []
-      };
-    } catch {
-      return undefined;
-    }
-  }
-
-  private async writeFigmaConnection(
-    workspaceFolder: vscode.Uri,
-    item: TaskManagerItem,
-    connection: TaskFigmaConnection
-  ): Promise<void> {
-    const figmaFolderUri = vscode.Uri.joinPath(workspaceFolder, ...PROJECT_FIGMA_FOLDER.split('/'));
-    await vscode.workspace.fs.createDirectory(figmaFolderUri);
-    const cacheUri = this.getFigmaCacheUri(workspaceFolder, item.type, item.id);
-    const payload = {
-      schemaVersion: FIGMA_CACHE_SCHEMA_VERSION,
-      itemId: item.id,
-      itemType: item.type,
-      cachedAt: new Date().toISOString(),
-      connection
-    };
-
-    await vscode.workspace.fs.writeFile(cacheUri, Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, 'utf8'));
-  }
 
   private async readJiraConnection(
     workspaceFolder: vscode.Uri,
@@ -2209,9 +2203,7 @@ export class TaskManagerService {
   }
 
   private formatJiraTicketMarkdown(ticket: TaskJiraTicket): string {
-    const metadata = Buffer.from(JSON.stringify(ticket), 'utf8').toString('base64');
     const lines = [
-      `<!-- ${JIRA_CACHE_PREFIX}${metadata} -->`,
       `# Jira: ${ticket.title}`,
       '',
       '## Ticket',
@@ -2249,22 +2241,6 @@ export class TaskManagerService {
   }
 
   private parseJiraTicketMarkdown(content: string, mtime?: number): TaskJiraTicket | undefined {
-    const metadataMatch = content.match(/<!--\s*agentkit:jira:([A-Za-z0-9+/=]+)\s*-->/);
-
-    if (metadataMatch) {
-      try {
-        const ticket = JSON.parse(Buffer.from(metadataMatch[1], 'base64').toString('utf8')) as TaskJiraTicket;
-        return {
-          ...ticket,
-          comments: Array.isArray(ticket.comments) ? ticket.comments : [],
-          content: ticket.content || content,
-          lastReadAt: ticket.lastReadAt || new Date(mtime || Date.now()).toISOString()
-        };
-      } catch {
-        // Fall through to the lightweight markdown parser.
-      }
-    }
-
     const title = content.match(/^# Jira:\s*(.+)$/m)?.[1]?.trim() ||
       content.match(/^## Title\s+([\s\S]*?)(?:\n## |\s*$)/m)?.[1]?.trim();
 
@@ -2346,6 +2322,10 @@ export class TaskManagerService {
     return vscode.Uri.joinPath(this.getTaskItemFolderUri(workspaceFolder, type, id), TASK_ITEM_METADATA_FILE_NAME);
   }
 
+  private getTaskItemWorkflowUri(workspaceFolder: vscode.Uri, type: TaskItemType, id: string): vscode.Uri {
+    return vscode.Uri.joinPath(this.getTaskItemFolderUri(workspaceFolder, type, id), TASK_ITEM_WORKFLOW_FILE_NAME);
+  }
+
   private getTaskItemMetadataUriForFolder(workspaceFolder: vscode.Uri, folderName: string, id: string): vscode.Uri {
     return vscode.Uri.joinPath(workspaceFolder, PROJECT_FOLDER, folderName, id, TASK_ITEM_METADATA_FILE_NAME);
   }
@@ -2358,9 +2338,6 @@ export class TaskManagerService {
     return vscode.Uri.joinPath(workspaceFolder, ...this.getTaskItemJiraRelativePath(type, id).split('/'));
   }
 
-  private getFigmaCacheUri(workspaceFolder: vscode.Uri, type: TaskItemType, id: string): vscode.Uri {
-    return vscode.Uri.joinPath(workspaceFolder, ...this.getFigmaCacheRelativePath(type, id).split('/'));
-  }
 
   private getTaskItemFolderRelativePath(type: TaskItemType, id: string): string {
     return `${PROJECT_FOLDER}/${TASK_ITEM_FOLDERS[type]}/${id}`;
@@ -2381,9 +2358,6 @@ export class TaskManagerService {
     return `${this.getTaskItemFolderRelativePath(type, id)}/${JIRA_MARKDOWN_FILE_NAME}`;
   }
 
-  private getFigmaCacheRelativePath(type: TaskItemType, id: string): string {
-    return `${PROJECT_FIGMA_FOLDER}/${type}-${id}.json`;
-  }
 
   private async statUri(uri: vscode.Uri): Promise<vscode.FileStat | undefined> {
     try {
@@ -2403,9 +2377,36 @@ export class TaskManagerService {
   ): Promise<void> {
     try {
       await vscode.workspace.fs.delete(uri, options);
-    } catch {
-      // Missing cache files are fine during task item deletion.
+      return;
+    } catch (error) {
+      if (!await this.uriExists(uri)) {
+        return;
+      }
+
+      if (options.useTrash) {
+        try {
+          await vscode.workspace.fs.delete(uri, {
+            ...options,
+            useTrash: false
+          });
+          logger.warn(`Trash delete failed for ${this.getUriDisplayPath(uri)}; deleted permanently instead.`);
+          return;
+        } catch (fallbackError) {
+          if (await this.uriExists(uri)) {
+            throw new Error(`Failed to delete ${this.getUriDisplayPath(uri)}: ${(fallbackError as Error).message}`);
+          }
+          return;
+        }
+      }
+
+      if (await this.uriExists(uri)) {
+        throw new Error(`Failed to delete ${this.getUriDisplayPath(uri)}: ${(error as Error).message}`);
+      }
     }
+  }
+
+  private getUriDisplayPath(uri: vscode.Uri): string {
+    return uri.fsPath || uri.toString();
   }
 
   private getDocumentsRelativeFolder(): string {

@@ -3,8 +3,10 @@ import { registerCommands } from './commands/registerCommands';
 import { InstalledAgentsProvider } from './providers/InstalledAgentsProvider';
 import { AvailableAgentsProvider } from './providers/AvailableAgentsProvider';
 import { TaskActionsProvider } from './providers/TaskActionsProvider';
+import { MemoryTreeProvider } from './providers/MemoryTreeProvider';
 import { ConfigService } from './services/ConfigService';
 import { FileSystemService } from './services/FileSystemService';
+import { MemoryService } from './features/memory/MemoryService';
 import { logger } from './utils/logger';
 import { COMMANDS, TREE_VIEW_IDS, GLOBAL_STATE_KEYS } from './utils/constants';
 import { ClaudeContextProvider } from './providers/ClaudeContextProvider';
@@ -15,6 +17,20 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Show welcome message on first activation
   showWelcomeMessageIfNeeded(context, configService);
+
+  // Initialize memory service if a workspace is open
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  let memoryService: MemoryService | undefined;
+  let memoryProvider: MemoryTreeProvider | undefined;
+
+  if (workspaceRoot) {
+    memoryService = new MemoryService(workspaceRoot);
+    memoryService.initialize().catch(err =>
+      logger.error('Failed to initialize memory service', err)
+    );
+    memoryProvider = new MemoryTreeProvider(memoryService);
+    memoryProvider.refresh().catch(() => undefined);
+  }
 
   // Register tree data providers
   const installedAgentsProvider = new InstalledAgentsProvider();
@@ -40,7 +56,17 @@ export function activate(context: vscode.ExtensionContext) {
     showCollapseAll: false,
   });
 
-  context.subscriptions.push(installedTreeView, availableTreeView, claudeContextTreeView, taskTreeView);
+  const treeViews: vscode.Disposable[] = [installedTreeView, availableTreeView, claudeContextTreeView, taskTreeView];
+
+  if (memoryProvider) {
+    const memoryTreeView = vscode.window.createTreeView(TREE_VIEW_IDS.MEMORY, {
+      treeDataProvider: memoryProvider,
+      showCollapseAll: false
+    });
+    treeViews.push(memoryTreeView);
+  }
+
+  context.subscriptions.push(...treeViews);
 
   // Register commands
   registerCommands({
@@ -48,7 +74,9 @@ export function activate(context: vscode.ExtensionContext) {
     installedProvider: installedAgentsProvider,
     availableProvider: availableAgentsProvider,
     fileSystemService,
-    configService
+    configService,
+    memoryService,
+    memoryProvider
   });
 
   // Setup file watchers
