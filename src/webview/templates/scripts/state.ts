@@ -33,9 +33,21 @@ let deleteConfirmState = {
   isDeleting: false
 };
 let selectedNodeId = 'document';
+let selectedWorkflowStepKey = '';
+let selectedWorkflowStep = null;
+let taskTreeZoom = 1;
+let detailModalState = {
+  isOpen: false
+};
+let workflowRunState = {
+  status: 'idle',
+  pendingRun: false,
+  message: ''
+};
 let taskState = {
   mode: currentMode,
   items: [],
+  currentWorkflow: undefined,
   projectFolder: '.project',
   documentsFolder: '',
   documents: [],

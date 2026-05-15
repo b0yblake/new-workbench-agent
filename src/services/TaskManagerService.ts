@@ -12,7 +12,7 @@ import { FileSystemService } from './FileSystemService';
 import { MemoryService } from '../features/memory/MemoryService';
 import { compressAgentText } from '../features/compression';
 import { WorkflowStorageService } from '../features/workflows/WorkflowStorageService';
-import { stringifyWorkflow } from '../features/workflows/yaml';
+import { parseWorkflow, stringifyWorkflow } from '../features/workflows/yaml';
 import type { WorkflowBlock, WorkflowFile, WorkflowStepBlock, WorkflowStepType } from '../features/workflows/types';
 import { logger } from '../utils/logger';
 import {
@@ -162,6 +162,7 @@ export class TaskManagerService {
       return {
         mode,
         items: [],
+        currentWorkflow: undefined,
         projectFolder: PROJECT_FOLDER,
         documentsFolder: this.getDocumentsRelativeFolder(),
         documents: [],
@@ -182,6 +183,10 @@ export class TaskManagerService {
     const isSameItem = Boolean(currentItem && this.currentItem?.id === currentItem.id && this.currentItem?.type === currentItem.type);
     const loadedFigmaConnection = isSameItem ? this.figmaConnection : undefined;
     const loadedJiraConnection = currentItem ? await this.readJiraConnection(workspaceFolder, currentItem) : undefined;
+    const currentWorkflow = currentItem
+      ? await this.readTaskItemWorkflow(workspaceFolder, currentItem.type, currentItem.id)
+        || workflows.find(workflow => workflow.id === currentItem.workflowId)
+      : undefined;
 
     if (currentItem) {
       this.currentItem = currentItem;
@@ -197,6 +202,7 @@ export class TaskManagerService {
       mode: stateMode,
       items,
       currentItem,
+      currentWorkflow,
       projectFolder: PROJECT_FOLDER,
       documentsFolder,
       documents,
@@ -1744,7 +1750,8 @@ export class TaskManagerService {
     const jiraStat = await this.statUri(jiraUri);
     const updatedAt = this.getLatestStatDate([folderStat, markdownStat, jiraStat]);
     const metadata = await this.readTaskItemMetadata(workspaceFolder, itemType, itemId);
-    const workflow = workflows.find(candidate => candidate.id === metadata?.workflowId);
+    const workflow = await this.readTaskItemWorkflow(workspaceFolder, itemType, itemId)
+      || workflows.find(candidate => candidate.id === metadata?.workflowId);
     const summary = this.getTaskItemSummary(
       metadata?.workflowId,
       workflow,
@@ -2085,6 +2092,30 @@ export class TaskManagerService {
 
     await vscode.workspace.fs.createDirectory(this.getTaskItemFolderUri(workspaceFolder, type, id));
     await vscode.workspace.fs.writeFile(workflowUri, Buffer.from(normalizedContent, 'utf8'));
+  }
+
+  private async readTaskItemWorkflow(
+    workspaceFolder: vscode.Uri,
+    type: TaskItemType,
+    id: string
+  ): Promise<WorkflowFile | undefined> {
+    const workflowUri = this.getTaskItemWorkflowUri(workspaceFolder, type, id);
+
+    if (!await this.uriExists(workflowUri)) {
+      return undefined;
+    }
+
+    try {
+      const content = Buffer.from(await vscode.workspace.fs.readFile(workflowUri)).toString('utf8');
+      const workflow = parseWorkflow(content);
+      return {
+        ...workflow,
+        fileName: TASK_ITEM_WORKFLOW_FILE_NAME
+      };
+    } catch (error) {
+      logger.warn(`Unable to read task workflow ${workflowUri.fsPath}: ${(error as Error).message}`);
+      return undefined;
+    }
   }
 
   private async migrateLegacyTaskMarkdown(

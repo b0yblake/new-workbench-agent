@@ -15,6 +15,9 @@ window.addEventListener('message', event => {
     applyTaskState(message.data.state, true);
     currentItem = message.data.item;
     selectedNodeId = 'document';
+    selectedWorkflowStepKey = '';
+    selectedWorkflowStep = null;
+    detailModalState.isOpen = false;
     resetDetailFormState();
     createFormState.isCreating = false;
     createFormState.message = '';
@@ -29,6 +32,9 @@ window.addEventListener('message', event => {
     applyTaskState(message.data.state, true);
     currentItem = message.data.item;
     selectedNodeId = 'document';
+    selectedWorkflowStepKey = '';
+    selectedWorkflowStep = null;
+    detailModalState.isOpen = false;
     resetDetailFormState();
     listMessage = '';
     showView('detail');
@@ -72,6 +78,11 @@ window.addEventListener('message', event => {
         ? 'Edited markdown brief loaded.'
         : 'Generated markdown brief loaded.';
     markdownDialogState.isRegenerating = false;
+    if (workflowRunState.pendingRun) {
+      runWorkflowMarkdownContent(markdownDialogState.content);
+      renderMarkdownDialog();
+      return;
+    }
     refreshDetailView();
     renderMarkdownDialog();
   } else if (message.command === 'taskMarkdownUpdated') {
@@ -88,6 +99,11 @@ window.addEventListener('message', event => {
     refreshDetailView();
     renderMarkdownDialog();
   } else if (message.command === 'taskMarkdownFailed') {
+    if (workflowRunState.pendingRun || workflowRunState.status === 'running') {
+      failWorkflowRun(message.data.message || 'Markdown brief failed.');
+      renderMarkdownDialog();
+      return;
+    }
     markdownDialogState.isLoading = false;
     markdownDialogState.isSaving = false;
     markdownDialogState.isRunning = false;
@@ -103,14 +119,23 @@ window.addEventListener('message', event => {
     markdownDialogState.isOpen = false;
     markdownDialogState.isError = false;
     markdownDialogState.message = '';
+    workflowRunState.status = 'running';
+    workflowRunState.pendingRun = false;
+    workflowRunState.message = message.data.message || 'Claude Code terminal opened.';
     codeRunState.isRunning = true;
     codeRunState.isError = false;
     codeRunState.message = message.data.message || 'Claude Code terminal opened.';
     codeRunState.markdownPath = message.data.markdownPath || codeRunState.markdownPath;
     selectedNodeId = 'code';
+    selectedWorkflowStepKey = '';
+    selectedWorkflowStep = null;
+    detailModalState.isOpen = false;
     refreshDetailView();
     renderMarkdownDialog();
   } else if (message.command === 'taskMarkdownRunFailed') {
+    workflowRunState.status = 'idle';
+    workflowRunState.pendingRun = false;
+    workflowRunState.message = message.data.message || 'Run failed.';
     markdownDialogState.isRunning = false;
     markdownDialogState.isError = true;
     markdownDialogState.message = message.data.message || 'Run failed.';
@@ -118,9 +143,15 @@ window.addEventListener('message', event => {
     codeRunState.isError = true;
     codeRunState.message = message.data.message || 'Run failed.';
     selectedNodeId = 'code';
+    selectedWorkflowStepKey = '';
+    selectedWorkflowStep = null;
+    detailModalState.isOpen = true;
     refreshDetailView();
     renderMarkdownDialog();
   } else if (message.command === 'taskMarkdownRunStopped') {
+    workflowRunState.status = 'finished';
+    workflowRunState.pendingRun = false;
+    workflowRunState.message = 'Workflow completed.';
     codeRunState.isRunning = false;
     codeRunState.isError = false;
     codeRunState.message = message.data.message || 'Claude Code terminal closed.';
@@ -188,6 +219,12 @@ window.addEventListener('message', event => {
     currentMode = message.data.mode;
     currentItem = null;
     selectedNodeId = 'document';
+    selectedWorkflowStepKey = '';
+    selectedWorkflowStep = null;
+    detailModalState.isOpen = false;
+    workflowRunState.status = 'idle';
+    workflowRunState.pendingRun = false;
+    workflowRunState.message = '';
     createFormState.type = modeToItemType(currentMode);
     showView('list');
   }

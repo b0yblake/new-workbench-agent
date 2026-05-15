@@ -89,6 +89,7 @@ export interface TaskManagerState {
   mode: TaskManagerMode;
   items: TaskManagerItem[];
   currentItem?: TaskManagerItem;
+  currentWorkflow?: WorkflowFile;
   projectFolder: string;
   documentsFolder: string;
   documents: TaskDocument[];

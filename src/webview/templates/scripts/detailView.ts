@@ -22,171 +22,431 @@ function resetDetailFormState() {
   codeRunState.isError = false;
   codeRunState.message = '';
   codeRunState.markdownPath = '';
+  workflowRunState.status = 'idle';
+  workflowRunState.pendingRun = false;
+  workflowRunState.message = '';
 }
 
 function renderTree() {
   const tree = document.getElementById('taskTree');
-  tree.innerHTML = '';
+  if (!tree) {
+    return;
+  }
 
-  const nodes = taskState.nodes.length > 0 ? taskState.nodes : [
-    { id: 'document', label: 'Document', status: 'Unknown' },
-    { id: 'figma', label: 'Figma', status: 'Un-sync' },
-    { id: 'jira', label: 'Jira', status: 'Un-sync' },
-    { id: 'markdown', label: 'Markdown', status: 'Missing' },
-    { id: 'code', label: 'Code', status: 'Unknown' },
-    { id: 'testcase', label: 'Testcase', status: 'Unknown' }
-  ];
+  bindTaskTreeZoomControls();
 
-  const nodeLookup = nodes.reduce((lookup, node) => {
-    lookup[node.id] = node;
-    return lookup;
-  }, {});
-  const documentCount = (taskState.documents || []).length;
-  const figmaSelectedCount = taskState.figma && Array.isArray(taskState.figma.selectedNodeIds)
-    ? taskState.figma.selectedNodeIds.length
-    : 0;
-  const markdownMetaParts = [];
-  if (documentCount > 0) {
-    markdownMetaParts.push(documentCount + ' doc' + (documentCount === 1 ? '' : 's'));
+  const workflow = getActiveTaskWorkflow();
+  const blocks = workflow && Array.isArray(workflow.blocks) ? workflow.blocks : [];
+  const title = workflow?.name || currentItem?.summary?.workflowName || 'Task workflow';
+  const fileName = workflow?.fileName || 'workflow.yaml';
+
+  if (blocks.length === 0) {
+    tree.innerHTML = getWorkflowDetailCanvasShell(
+      title,
+      fileName,
+      '<div class="workflow-detail-empty">No workflow steps found for this item.</div>'
+    );
+    applyTaskTreeZoom();
+    bindWorkflowDetailActions();
+    return;
   }
-  if (figmaSelectedCount > 0) {
-    markdownMetaParts.push(figmaSelectedCount + ' screen' + (figmaSelectedCount === 1 ? '' : 's'));
+
+  const parts = [];
+  blocks.forEach((block, index) => {
+    if (index > 0) {
+      parts.push('<div class="workflow-detail-connector"></div>');
+    }
+    parts.push(getWorkflowDetailBlockHtml(block, { type: 'root', index }));
+  });
+
+  tree.innerHTML = getWorkflowDetailCanvasShell(
+    title,
+    fileName,
+    '<div class="workflow-detail-tree">' + parts.join('') + '</div>'
+  );
+
+  applyTaskTreeZoom();
+  bindWorkflowDetailTree();
+  bindWorkflowDetailActions();
+}
+
+function getActiveTaskWorkflow() {
+  if (taskState.currentWorkflow) {
+    return taskState.currentWorkflow;
   }
-  if (taskState.jira && taskState.jira.ticket) {
-    markdownMetaParts.push('Jira');
+
+  const item = currentItem || taskState.currentItem;
+  const workflows = Array.isArray(taskState.workflows) ? taskState.workflows : [];
+  const matchedWorkflow = item?.workflowId
+    ? workflows.find(workflow => workflow.id === item.workflowId)
+    : null;
+  if (matchedWorkflow) {
+    return matchedWorkflow;
   }
-  const flowNodes = [
-    createFlowNode('document', 44, 72, 238, 96, 'wide', getActiveModeCopy().documentTitle || 'Document', documentCount > 0 ? documentCount + ' markdown file' + (documentCount === 1 ? '' : 's') : 'Drop SRS, PDF, notes'),
-    createFlowNode('figma', 342, 72, 112, 96, 'square', 'Figma', 'Design sync'),
-    createFlowNode('jira', 532, 72, 112, 96, 'square', 'Jira', 'Issue sync'),
-    createFlowNode('markdown', 278, 224, 144, 96, 'square', 'Markdown', markdownMetaParts.length > 0 ? markdownMetaParts.join(', ') : 'Brief'),
-    createFlowNode('code', 154, 352, 112, 112, 'circle', 'Code', codeRunState.isRunning ? 'Claude Code' : 'Later'),
-    createFlowNode('testcase', 474, 352, 112, 112, 'circle', 'Testcase', 'Later')
-  ];
-  const sourceReady = {
-    document: isProcessNodeReady(nodeLookup.document),
-    figma: isProcessNodeReady(nodeLookup.figma),
-    jira: isProcessNodeReady(nodeLookup.jira)
+
+  return createFallbackWorkflowFromProcessNodes();
+}
+
+function createFallbackWorkflowFromProcessNodes() {
+  const nodes = Array.isArray(taskState.nodes) ? taskState.nodes : [];
+  if (nodes.length === 0) {
+    return null;
+  }
+
+  return {
+    version: 1,
+    id: 'fallback-task-process',
+    name: 'Task process',
+    fileName: 'generated',
+    blocks: nodes.map(node => ({
+      id: node.id,
+      kind: 'step',
+      stepType: getWorkflowStepTypeForTaskNode(node.id),
+      title: node.label,
+      status: taskNodeStatusToWorkflowStatus(node.status)
+    }))
+  };
+}
+
+function getWorkflowStepTypeForTaskNode(nodeId) {
+  const types = {
+    document: 'collect_document',
+    figma: 'collect_figma',
+    jira: 'collect_jira',
+    markdown: 'review_human',
+    code: 'custom',
+    testcase: 'unit_test'
   };
 
-  tree.innerHTML = getFlowCanvasShell(sourceReady, codeRunState.isRunning);
-  const canvas = tree.querySelector('.flow-canvas');
-
-  flowNodes.forEach(node => {
-    const sourceNode = nodeLookup[node.id] || { id: node.id, label: node.title, status: 'Unknown' };
-    const displayStatus = getDisplayNodeStatus(node, sourceNode);
-    if (node.type !== 'wide') {
-      const label = document.createElement('span');
-      label.className = 'flow-label' + (node.type === 'circle' ? ' label-above' : '');
-      label.style.setProperty('--x', node.x + 'px');
-      label.style.setProperty('--y', (node.type === 'circle' ? node.y : node.y + node.height + 8) + 'px');
-      label.style.setProperty('--w', node.width + 'px');
-      label.textContent = node.title;
-      canvas.appendChild(label);
-    }
-
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'flow-node ' + node.type +
-      (node.id === selectedNodeId ? ' selected' : '') +
-      (node.id === 'code' && codeRunState.isRunning ? ' running' : '');
-    button.dataset.nodeId = node.id;
-    button.style.setProperty('--x', node.x + 'px');
-    button.style.setProperty('--y', node.y + 'px');
-    button.style.setProperty('--w', node.width + 'px');
-    button.style.setProperty('--h', node.height + 'px');
-    button.setAttribute('aria-label', sourceNode.label + ', status ' + displayStatus);
-    button.innerHTML = getFlowNodeHtml(node, displayStatus);
-    button.onclick = () => {
-      selectedNodeId = node.id;
-      renderTree();
-      renderDetail();
-      if (node.id === 'markdown') {
-        openMarkdownDialog();
-      }
-    };
-    canvas.appendChild(button);
-  });
+  return types[nodeId] || 'custom';
 }
 
-function createFlowNode(id, x, y, width, height, type, title, meta) {
-  return { id, x, y, width, height, type, title, meta };
-}
-
-function isProcessNodeReady(node) {
-  return node && ['Ready', 'Sync'].includes(node.status);
-}
-
-function getDisplayNodeStatus(flowNode, sourceNode) {
-  if (flowNode.id === 'code' && codeRunState.isRunning) {
-    return 'Running';
+function taskNodeStatusToWorkflowStatus(status) {
+  if (status === 'Ready' || status === 'Sync') {
+    return 'success';
   }
 
-  return sourceNode?.status || 'Unknown';
+  if (status === 'Missing' || status === 'Un-sync') {
+    return 'idle';
+  }
+
+  return 'idle';
 }
 
-function getFlowCanvasShell(sourceReady, isCodeRunning) {
-  const documentLineClass = sourceReady.document ? ' ready' : '';
-  const figmaLineClass = sourceReady.figma ? ' ready' : '';
-  const jiraLineClass = sourceReady.jira ? ' ready' : '';
-  const codeLineClass = isCodeRunning ? ' running' : '';
-  const codeArrowMarker = isCodeRunning ? 'flowArrowRunning' : 'flowArrow';
+function getWorkflowDetailCanvasShell(title, fileName, bodyHtml) {
+  const runStatus = getWorkflowRunStatus();
+  return \`
+    <div class="workflow-detail-canvas run-\${runStatus}">
+      <div class="workflow-detail-titlebar">
+        <div class="workflow-detail-heading" title="\${escapeHtml(title)}">\${escapeHtml(title)}</div>
+        <div class="workflow-detail-file" title="\${escapeHtml(fileName)}">\${escapeHtml(fileName)}</div>
+      </div>
+      <div class="workflow-detail-body">
+        <div class="workflow-detail-zoom-surface" id="taskTreeZoomSurface">
+          \${bodyHtml}
+        </div>
+      </div>
+    </div>
+    \${getWorkflowActionBarHtml(runStatus)}
+  \`;
+}
+
+function getWorkflowDetailBlockHtml(block, locator) {
+  if (block.kind === 'parallel') {
+    return getWorkflowDetailParallelHtml(block, locator);
+  }
+
+  return getWorkflowDetailStepHtml(block, locator);
+}
+
+function getWorkflowDetailParallelHtml(block, locator) {
+  const children = Array.isArray(block.children) ? block.children : [];
+  const selectedClass = selectedWorkflowStepKey === workflowLocatorKey(locator) ? ' selected' : '';
+  const status = getWorkflowBlockDisplayStatus(block);
+  const title = getWorkflowDetailTaskTitle(block.title || 'Parallel');
+  const completedIcon = getWorkflowCompletedIconHtml();
+  const childrenHtml = children.length > 0
+    ? children.map((child, childIndex) => getWorkflowDetailStepHtml(child, {
+      type: 'parallel-child',
+      parentIndex: locator.index,
+      childIndex
+    })).join('')
+    : '<div class="workflow-detail-empty compact">No branches</div>';
 
   return \`
-    <div class="flow-canvas">
-      <svg class="flow-connectors" viewBox="0 0 700 500" aria-hidden="true">
-        <defs>
-          <marker id="flowArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path class="flow-arrow" d="M 0 0 L 10 5 L 0 10 z"></path>
-          </marker>
-          <marker id="flowArrowRunning" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path class="flow-arrow running" d="M 0 0 L 10 5 L 0 10 z"></path>
-          </marker>
-        </defs>
-        <path class="flow-line" d="M 282 120 L 342 120" marker-end="url(#flowArrow)"></path>
-        <path class="flow-line" d="M 454 120 L 532 120" marker-end="url(#flowArrow)"></path>
-        <path class="flow-line dashed source-line\${documentLineClass}" d="M 164 168 C 164 210 314 205 314 224"></path>
-        <path class="flow-line dashed source-line\${figmaLineClass}" d="M 398 168 C 398 190 350 198 350 224"></path>
-        <path class="flow-line dashed source-line\${jiraLineClass}" d="M 588 168 C 588 214 386 200 386 224"></path>
-        <path class="flow-line dashed code-line\${codeLineClass}" d="M 278 272 C 220 310 210 328 210 352" marker-end="url(#\${codeArrowMarker})"></path>
-        <path class="flow-line" d="M 422 272 C 512 302 530 326 530 352" marker-end="url(#flowArrow)"></path>
-      </svg>
+    <div class="workflow-detail-block-wrap parallel-wrap\${selectedClass}" data-workflow-group-locator='\${workflowLocatorAttr(locator)}'>
+      <div class="workflow-detail-parallel status-\${statusClass(status)}">
+        \${completedIcon}
+        <div class="workflow-detail-parallel-header">
+          <span>Parallel</span>
+          <span class="status-badge status-\${statusClass(status)}">\${escapeHtml(status)}</span>
+        </div>
+        <div class="workflow-detail-parallel-children">\${childrenHtml}</div>
+      </div>
+      <div class="workflow-detail-label" title="\${escapeHtml(title)}">\${escapeHtml(title)}</div>
+      <div class="workflow-detail-sublabel">parallel - \${children.length} branch\${children.length === 1 ? '' : 'es'}</div>
     </div>
   \`;
 }
 
-function getFlowNodeHtml(node, status) {
-  const ports = node.type === 'wide'
-    ? '<span class="flow-port left"></span><span class="flow-port round right"></span><span class="flow-port bottom-a"></span><span class="flow-port bottom-b"></span><span class="flow-port bottom-c"></span>'
-    : '<span class="flow-port left"></span><span class="flow-port round right"></span>';
+function getWorkflowDetailStepHtml(step, locator) {
+  const locatorKey = workflowLocatorKey(locator);
+  const selectedClass = selectedWorkflowStepKey === locatorKey ? ' selected' : '';
+  const detailNodeId = getDetailNodeIdForWorkflowStep(step);
+  const processNode = getProcessNodeByDetailId(detailNodeId);
+  const status = getWorkflowStepDisplayStatus(step, processNode);
+  const stepType = formatStepType(step.stepType);
+  const title = getWorkflowDetailTaskTitle(step.title || getWorkflowStepTitle(step.stepType));
+  const runningDisabled = getWorkflowRunStatus() === 'running';
+  const completedIcon = getWorkflowCompletedIconHtml();
+  const runningBorder = getWorkflowRunningBorderHtml();
 
   return \`
-    <span class="flow-icon">\${getNodeIcon(node.id)}</span>
-    <span>
-      <span class="flow-title">\${escapeHtml(node.title)}</span>
-      <span class="flow-meta">\${escapeHtml(node.meta)}</span>
-    </span>
-    <span class="flow-status status-badge status-\${statusClass(status)}">\${escapeHtml(status)}</span>
-    \${ports}
+    <button class="workflow-detail-block-wrap step-wrap\${selectedClass}" type="button" data-workflow-step-locator='\${workflowLocatorAttr(locator)}' aria-label="\${escapeHtml(title + ', status ' + status)}"\${runningDisabled ? ' disabled' : ''}>
+      <span class="workflow-detail-card status-\${statusClass(status)}">
+        \${runningBorder}
+        \${completedIcon}
+        <span class="workflow-detail-icon">\${getWorkflowStepIconHtml(step)}</span>
+        <span class="workflow-detail-status status-badge status-\${statusClass(status)}">\${escapeHtml(status)}</span>
+      </span>
+      <span class="workflow-detail-label" title="\${escapeHtml(title)}">\${escapeHtml(title)}</span>
+      <span class="workflow-detail-sublabel">\${escapeHtml(stepType)}</span>
+    </button>
   \`;
 }
 
-function getNodeIcon(nodeId) {
-  const icons = {
-    document: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v14H7z"></path><path d="M14 3v5h5"></path><path d="M9 13h6"></path><path d="M9 17h6"></path></svg>',
-    figma: '<svg viewBox="0 0 24 24" fill="none"><path fill="#a78bfa" d="M13 2h4.2a3.3 3.3 0 0 1 0 6.6H13z"></path><path fill="#60a5fa" d="M13 8.6h4.2a3.3 3.3 0 0 1 0 6.6H13z"></path><path fill="#34d399" d="M13 15.2h4.2a3.3 3.3 0 1 1-4.2 3.3z"></path><path fill="#f97316" d="M6.8 8.6H13v6.6H6.8a3.3 3.3 0 0 1 0-6.6z"></path><path fill="#ef4444" d="M6.8 2H13v6.6H6.8a3.3 3.3 0 0 1 0-6.6z"></path></svg>',
-    jira: '<svg viewBox="0 0 24 24" fill="none"><path fill="#2684ff" d="M12 3 4 11l8 8 8-8z"></path><path fill="#79b8ff" d="m12 3 4 4-8 8-4-4z"></path><path fill="#0052cc" d="m16 7 4 4-8 8-4-4z"></path></svg>',
-    markdown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"></path><path d="M7 16V8l3 4 3-4v8"></path><path d="M16 8v8"></path><path d="m16 16 2-2"></path><path d="m16 16-2-2"></path></svg>',
-    code: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 8-4 4 4 4"></path><path d="m16 8 4 4-4 4"></path><path d="m14 5-4 14"></path></svg>',
-    testcase: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11.5 11.3 14 16 8.8"></path><path d="M5 4h14v16H5z"></path><path d="M8 4V2"></path><path d="M16 4V2"></path></svg>'
-  };
+function bindWorkflowDetailTree() {
+  if (getWorkflowRunStatus() === 'running') {
+    return;
+  }
 
-  return icons[nodeId] || icons.document;
+  document.querySelectorAll('[data-workflow-step-locator]').forEach(button => {
+    button.onclick = () => {
+      const locator = JSON.parse(button.dataset.workflowStepLocator);
+      const step = getWorkflowBlockByLocator(locator);
+      if (!step) {
+        return;
+      }
+
+      openWorkflowStepDetail(step, locator);
+    };
+  });
+
+  document.querySelectorAll('[data-workflow-group-locator]').forEach(group => {
+    group.onclick = event => {
+      const target = event.target instanceof Element ? event.target : event.target.parentElement;
+      if (target?.closest('[data-workflow-step-locator]')) {
+        return;
+      }
+
+      const locator = JSON.parse(group.dataset.workflowGroupLocator);
+      const block = getWorkflowBlockByLocator(locator);
+      if (!block) {
+        return;
+      }
+
+      openWorkflowStepDetail(block, locator);
+    };
+  });
+}
+
+function bindWorkflowDetailActions() {
+  const runButton = document.getElementById('taskWorkflowRunButton');
+  if (!runButton) {
+    return;
+  }
+
+  runButton.onclick = () => {
+    const runStatus = getWorkflowRunStatus();
+    if (runStatus === 'idle') {
+      startWorkflowRunFromAction();
+      return;
+    }
+
+    if (runStatus === 'running') {
+      workflowRunState.message = 'Close the Claude Code terminal to stop this run.';
+      renderTree();
+    }
+  };
+}
+
+function getWorkflowActionBarHtml(runStatus) {
+  const labels = {
+    idle: 'RUN',
+    running: 'STOP',
+    finished: 'COMPLETED'
+  };
+  const message = workflowRunState.message
+    ? '<span class="workflow-run-message">' + escapeHtml(workflowRunState.message) + '</span>'
+    : '';
+
+  return \`
+    <div class="workflow-detail-actionbar">
+      <div class="workflow-detail-actions">
+        \${message}
+        <button id="taskWorkflowRunButton" class="workflow-run-button \${runStatus}" type="button">\${labels[runStatus] || labels.idle}</button>
+      </div>
+    </div>
+  \`;
+}
+
+function startWorkflowRunFromAction() {
+  workflowRunState.status = 'running';
+  workflowRunState.pendingRun = true;
+  workflowRunState.message = 'Preparing markdown brief...';
+  markdownDialogState.isOpen = false;
+  markdownDialogState.isLoading = true;
+  markdownDialogState.isRunning = false;
+  markdownDialogState.isError = false;
+  codeRunState.isRunning = true;
+  codeRunState.isError = false;
+  codeRunState.message = 'Preparing markdown brief...';
+  codeRunState.markdownPath = '';
+  selectedWorkflowStepKey = '';
+  selectedWorkflowStep = null;
+  selectedNodeId = 'code';
+  detailModalState.isOpen = false;
+  renderMarkdownDialog();
+  refreshDetailView();
+
+  vscode.postMessage({
+    command: 'getTaskMarkdown',
+    data: getTaskRequestContext()
+  });
+}
+
+function runWorkflowMarkdownContent(content) {
+  const cleanContent = String(content || '').trim();
+  if (!cleanContent) {
+    failWorkflowRun('No markdown brief to run.');
+    return;
+  }
+
+  workflowRunState.status = 'running';
+  workflowRunState.pendingRun = false;
+  workflowRunState.message = 'Opening Claude Code terminal...';
+  markdownDialogState.isOpen = false;
+  markdownDialogState.isLoading = false;
+  markdownDialogState.isRunning = true;
+  markdownDialogState.isError = false;
+  codeRunState.isRunning = true;
+  codeRunState.isError = false;
+  codeRunState.message = 'Opening Claude Code terminal...';
+  codeRunState.markdownPath = '';
+  selectedWorkflowStepKey = '';
+  selectedWorkflowStep = null;
+  selectedNodeId = 'code';
+  detailModalState.isOpen = false;
+  renderMarkdownDialog();
+  refreshDetailView();
+
+  vscode.postMessage({
+    command: 'runTaskMarkdown',
+    data: getTaskRequestContext({
+      content: cleanContent
+    })
+  });
+}
+
+function failWorkflowRun(message) {
+  workflowRunState.status = 'idle';
+  workflowRunState.pendingRun = false;
+  workflowRunState.message = message || 'Run failed.';
+  markdownDialogState.isLoading = false;
+  markdownDialogState.isRunning = false;
+  markdownDialogState.isError = true;
+  markdownDialogState.message = workflowRunState.message;
+  codeRunState.isRunning = false;
+  codeRunState.isError = true;
+  codeRunState.message = workflowRunState.message;
+  selectedWorkflowStepKey = '';
+  selectedWorkflowStep = null;
+  selectedNodeId = 'code';
+  detailModalState.isOpen = true;
+  refreshDetailView();
+}
+
+function openWorkflowStepDetail(block, locator) {
+  selectedWorkflowStepKey = workflowLocatorKey(locator);
+  selectedWorkflowStep = block;
+  selectedNodeId = block.kind === 'parallel'
+    ? 'custom'
+    : getDetailNodeIdForWorkflowStep(block);
+  detailModalState.isOpen = true;
+  renderTree();
+  renderTaskDetailModal();
+}
+
+function closeTaskDetailModal() {
+  detailModalState.isOpen = false;
+  renderTaskDetailModal();
+}
+
+function renderTaskDetailModal() {
+  const existingDialog = document.getElementById('taskDetailModal');
+  if (!detailModalState.isOpen) {
+    if (existingDialog) {
+      existingDialog.remove();
+    }
+    return;
+  }
+
+  const activeNode = getActiveDetailNode();
+  const title = activeNode.label || 'Workflow step';
+  const subtitle = selectedWorkflowStep
+    ? selectedWorkflowStep.kind === 'parallel'
+      ? 'Parallel workflow group'
+      : formatStepType(selectedWorkflowStep.stepType)
+    : 'Task detail';
+  const dialogHtml = \`
+    <div class="task-detail-modal-backdrop" id="taskDetailModal">
+      <div class="task-detail-modal" role="dialog" aria-modal="true" aria-label="\${escapeHtml(title)}">
+        <div class="task-detail-modal-header">
+          <div>
+            <h2>\${escapeHtml(title)}</h2>
+            <p class="detail-copy">\${escapeHtml(subtitle)}</p>
+          </div>
+          <button class="task-detail-modal-close" id="closeTaskDetailModalBtn" type="button" aria-label="Close detail">x</button>
+        </div>
+        <div class="task-detail-modal-body" id="taskDetail"></div>
+      </div>
+    </div>
+  \`;
+
+  if (existingDialog) {
+    existingDialog.outerHTML = dialogHtml;
+  } else {
+    document.body.insertAdjacentHTML('beforeend', dialogHtml);
+  }
+
+  bindTaskDetailModal();
+  renderDetail();
+}
+
+function bindTaskDetailModal() {
+  const closeButton = document.getElementById('closeTaskDetailModalBtn');
+  const backdrop = document.getElementById('taskDetailModal');
+
+  if (closeButton) {
+    closeButton.onclick = closeTaskDetailModal;
+  }
+
+  if (backdrop) {
+    backdrop.onclick = event => {
+      if (event.target === backdrop) {
+        closeTaskDetailModal();
+      }
+    };
+  }
 }
 
 function renderDetail() {
   const detail = document.getElementById('taskDetail');
-  const activeNode = (taskState.nodes || []).find(node => node.id === selectedNodeId);
+  if (!detail) {
+    return;
+  }
+
+  const activeNode = getActiveDetailNode();
 
   if (selectedNodeId === 'document') {
     renderDocumentDetail(detail);
@@ -213,12 +473,49 @@ function renderDetail() {
     return;
   }
 
+  renderGenericWorkflowStepDetail(detail, activeNode);
+}
+
+function renderGenericWorkflowStepDetail(detail, activeNode) {
+  const status = activeNode?.status || 'Unknown';
+  const config = selectedWorkflowStep && selectedWorkflowStep.config
+    ? getWorkflowConfigPreview(selectedWorkflowStep.config)
+    : '';
+
   detail.innerHTML = \`
     <div class="detail-header">
       <h2>\${escapeHtml(activeNode?.label || selectedNodeId)}</h2>
-      <p class="detail-copy">This source will be connected in a later step.</p>
+      <span class="status-badge status-\${statusClass(status)}">\${escapeHtml(status)}</span>
+      <p class="detail-copy">\${escapeHtml(getGenericStepCopy(selectedWorkflowStep))}</p>
     </div>
-    <p class="empty-state">Current status: \${escapeHtml(activeNode?.status || 'Unknown')}</p>
+    \${config}
+  \`;
+}
+
+function getGenericStepCopy(step) {
+  if (!step) {
+    return 'Current status: Unknown';
+  }
+
+  if (step.kind === 'parallel') {
+    const children = Array.isArray(step.children) ? step.children.length : 0;
+    return 'Parallel group with ' + children + ' branch' + (children === 1 ? '' : 'es') + '.';
+  }
+
+  return 'Workflow step type: ' + formatStepType(step.stepType) + '.';
+}
+
+function getWorkflowConfigPreview(config) {
+  const entries = Object.keys(config || {});
+  if (entries.length === 0) {
+    return '';
+  }
+
+  return \`
+    <div class="workflow-step-config">
+      <div class="jira-ticket-field-title">Config</div>
+      <pre class="jira-ticket-content">\${escapeHtml(JSON.stringify(config, null, 2))}</pre>
+    </div>
   \`;
 }
 
@@ -250,7 +547,7 @@ function renderCodeDetail(detail, activeNode) {
 
   detail.innerHTML = \`
     <div class="detail-header">
-      <h2>Code</h2>
+      <h2>\${escapeHtml(activeNode?.label || 'Code')}</h2>
       <span class="status-badge status-\${statusClass(status)}">\${escapeHtml(status)}</span>
       <p class="detail-copy">Claude Code execution for this task item.</p>
     </div>
@@ -262,6 +559,258 @@ function renderCodeDetail(detail, activeNode) {
       <p class="code-run-status">\${escapeHtml(message)}</p>
     </div>
   \`;
+}
+
+function getWorkflowBlockByLocator(locator) {
+  const workflow = getActiveTaskWorkflow();
+  const blocks = workflow && Array.isArray(workflow.blocks) ? workflow.blocks : [];
+
+  if (!locator) {
+    return null;
+  }
+
+  if (locator.type === 'root') {
+    return blocks[Number(locator.index)] || null;
+  }
+
+  if (locator.type === 'parallel-child') {
+    const parent = blocks[Number(locator.parentIndex)];
+    return parent && parent.kind === 'parallel'
+      ? parent.children[Number(locator.childIndex)] || null
+      : null;
+  }
+
+  return null;
+}
+
+function workflowLocatorKey(locator) {
+  return JSON.stringify(locator || {});
+}
+
+function workflowLocatorAttr(locator) {
+  return escapeHtml(workflowLocatorKey(locator));
+}
+
+function getDetailNodeIdForWorkflowStep(step) {
+  if (!step || step.kind === 'parallel') {
+    return 'custom';
+  }
+
+  const mapping = {
+    collect_document: 'document',
+    collect_figma: 'figma',
+    collect_jira: 'jira',
+    review_human: 'markdown',
+    unit_test: 'testcase',
+    automation_test: 'testcase',
+    auto_commit: 'code',
+    custom: 'code'
+  };
+
+  return mapping[step.stepType] || 'custom';
+}
+
+function getProcessNodeByDetailId(nodeId) {
+  const nodes = Array.isArray(taskState.nodes) ? taskState.nodes : [];
+  return nodes.find(node => node.id === nodeId) || null;
+}
+
+function getActiveDetailNode() {
+  const processNode = getProcessNodeByDetailId(selectedNodeId);
+  if (selectedWorkflowStep) {
+    const stepTitle = selectedWorkflowStep.title || processNode?.label || getWorkflowStepTitle(selectedWorkflowStep.stepType);
+    return {
+      id: selectedNodeId,
+      label: getWorkflowDetailTaskTitle(stepTitle),
+      status: selectedWorkflowStep.kind === 'parallel'
+        ? getWorkflowBlockDisplayStatus(selectedWorkflowStep)
+        : getWorkflowStepDisplayStatus(selectedWorkflowStep, processNode)
+    };
+  }
+
+  return processNode || { id: selectedNodeId, label: selectedNodeId, status: 'Unknown' };
+}
+
+function getWorkflowDetailTaskTitle(stepTitle) {
+  const cleanStepTitle = String(stepTitle || '').trim();
+  const workflow = getActiveTaskWorkflow();
+  const workflowTitle = String(workflow?.name || currentItem?.summary?.workflowName || '').trim();
+
+  if (!workflowTitle || !cleanStepTitle) {
+    return cleanStepTitle || workflowTitle || 'Workflow step';
+  }
+
+  if (cleanStepTitle === workflowTitle || cleanStepTitle.startsWith(workflowTitle + ' (')) {
+    return cleanStepTitle;
+  }
+
+  return workflowTitle + ' (' + cleanStepTitle + ')';
+}
+
+function getWorkflowRunStatus() {
+  if (codeRunState.isRunning || workflowRunState.status === 'running') {
+    return 'running';
+  }
+
+  if (workflowRunState.status === 'finished') {
+    return 'finished';
+  }
+
+  return 'idle';
+}
+
+function getWorkflowCompletedIconHtml() {
+  if (getWorkflowRunStatus() !== 'finished') {
+    return '';
+  }
+
+  return '<span class="workflow-detail-completed-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7.5 12.4 10.5 15.4 16.8 8.6"></path></svg></span>';
+}
+
+function getWorkflowRunningBorderHtml() {
+  return '<span class="workflow-detail-running-border" aria-hidden="true"><svg viewBox="0 0 112 112" focusable="false"><rect x="2" y="2" width="108" height="108" rx="6" ry="6" pathLength="100"></rect></svg></span>';
+}
+
+function getWorkflowBlockDisplayStatus(block) {
+  const runStatus = getWorkflowRunStatus();
+  if (runStatus === 'running') {
+    return 'Running';
+  }
+
+  if (runStatus === 'finished') {
+    return 'Completed';
+  }
+
+  if (!block) {
+    return 'Unknown';
+  }
+
+  if (block.status === 'running') {
+    return 'Running';
+  }
+
+  if (block.status === 'failed') {
+    return 'Failed';
+  }
+
+  if (block.status === 'success') {
+    return 'Ready';
+  }
+
+  if (block.status === 'skipped') {
+    return 'Skipped';
+  }
+
+  return 'Unknown';
+}
+
+function getWorkflowStepDisplayStatus(step, processNode) {
+  const runStatus = getWorkflowRunStatus();
+  if (runStatus === 'running') {
+    return 'Running';
+  }
+
+  if (runStatus === 'finished') {
+    return 'Completed';
+  }
+
+  if (step?.status === 'running') {
+    return 'Running';
+  }
+
+  if (step?.status === 'failed') {
+    return 'Failed';
+  }
+
+  if (step?.status === 'skipped') {
+    return 'Skipped';
+  }
+
+  if (step?.status === 'success') {
+    return 'Ready';
+  }
+
+  if (step?.stepType === 'custom' && codeRunState.isRunning) {
+    return 'Running';
+  }
+
+  return processNode?.status || 'Unknown';
+}
+
+function getWorkflowStepTitle(stepType) {
+  const labels = {
+    collect_document: 'Document',
+    collect_figma: 'Figma',
+    collect_jira: 'Jira',
+    review_human: 'Human review',
+    unit_test: 'Unit test',
+    automation_test: 'Automation test',
+    auto_commit: 'Auto commit',
+    custom: 'Custom step'
+  };
+
+  return labels[stepType] || 'Workflow step';
+}
+
+function formatStepType(stepType) {
+  return String(stepType || 'custom').replace(/_/g, ' ');
+}
+
+function getWorkflowStepIconHtml(step) {
+  const detailNodeId = getDetailNodeIdForWorkflowStep(step);
+  if (detailNodeId !== 'custom') {
+    return getNodeIcon(detailNodeId);
+  }
+
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"></path><path d="M3 12h18"></path><path d="m6 6 12 12"></path><path d="m18 6-12 12"></path></svg>';
+}
+
+function getNodeIcon(nodeId) {
+  const icons = {
+    document: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v14H7z"></path><path d="M14 3v5h5"></path><path d="M9 13h6"></path><path d="M9 17h6"></path></svg>',
+    figma: '<svg viewBox="0 0 24 24" fill="none"><path fill="#a78bfa" d="M13 2h4.2a3.3 3.3 0 0 1 0 6.6H13z"></path><path fill="#60a5fa" d="M13 8.6h4.2a3.3 3.3 0 0 1 0 6.6H13z"></path><path fill="#34d399" d="M13 15.2h4.2a3.3 3.3 0 1 1-4.2 3.3z"></path><path fill="#f97316" d="M6.8 8.6H13v6.6H6.8a3.3 3.3 0 0 1 0-6.6z"></path><path fill="#ef4444" d="M6.8 2H13v6.6H6.8a3.3 3.3 0 0 1 0-6.6z"></path></svg>',
+    jira: '<svg viewBox="0 0 24 24" fill="none"><path fill="#2684ff" d="M12 3 4 11l8 8 8-8z"></path><path fill="#79b8ff" d="m12 3 4 4-8 8-4-4z"></path><path fill="#0052cc" d="m16 7 4 4-8 8-4-4z"></path></svg>',
+    markdown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"></path><path d="M7 16V8l3 4 3-4v8"></path><path d="M16 8v8"></path><path d="m16 16 2-2"></path><path d="m16 16-2-2"></path></svg>',
+    code: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 8-4 4 4 4"></path><path d="m16 8 4 4-4 4"></path><path d="m14 5-4 14"></path></svg>',
+    testcase: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11.5 11.3 14 16 8.8"></path><path d="M5 4h14v16H5z"></path><path d="M8 4V2"></path><path d="M16 4V2"></path></svg>'
+  };
+
+  return icons[nodeId] || icons.document;
+}
+
+function bindTaskTreeZoomControls() {
+  const zoomIn = document.getElementById('taskTreeZoomIn');
+  const zoomOut = document.getElementById('taskTreeZoomOut');
+  const zoomReset = document.getElementById('taskTreeZoomReset');
+
+  if (zoomIn) {
+    zoomIn.onclick = () => setTaskTreeZoom(taskTreeZoom + 0.1);
+  }
+
+  if (zoomOut) {
+    zoomOut.onclick = () => setTaskTreeZoom(taskTreeZoom - 0.1);
+  }
+
+  if (zoomReset) {
+    zoomReset.onclick = () => setTaskTreeZoom(1);
+  }
+}
+
+function setTaskTreeZoom(nextZoom) {
+  taskTreeZoom = Math.max(0.4, Math.min(2, Math.round(Number(nextZoom) * 10) / 10));
+  applyTaskTreeZoom();
+}
+
+function applyTaskTreeZoom() {
+  const surface = document.getElementById('taskTreeZoomSurface');
+  if (surface) {
+    surface.style.zoom = String(taskTreeZoom);
+  }
+
+  const label = document.getElementById('taskTreeZoomLevel');
+  if (label) {
+    label.textContent = Math.round(taskTreeZoom * 100) + '%';
+  }
 }
   `;
 }

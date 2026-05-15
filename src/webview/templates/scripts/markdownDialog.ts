@@ -85,24 +85,7 @@ function runMarkdownDialog() {
     return;
   }
 
-  markdownDialogState.isRunning = true;
-  markdownDialogState.isError = false;
-  markdownDialogState.message = 'Opening Claude Code terminal...';
-  markdownDialogState.isOpen = false;
-  codeRunState.isRunning = true;
-  codeRunState.isError = false;
-  codeRunState.message = 'Opening Claude Code terminal...';
-  codeRunState.markdownPath = '';
-  selectedNodeId = 'code';
-  renderMarkdownDialog();
-  refreshDetailView();
-
-  vscode.postMessage({
-    command: 'runTaskMarkdown',
-    data: getTaskRequestContext({
-      content: markdownDialogState.content
-    })
-  });
+  runWorkflowMarkdownContent(markdownDialogState.content);
 }
 
 function renderMarkdownDialog() {

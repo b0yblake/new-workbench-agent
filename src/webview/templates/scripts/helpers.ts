@@ -35,7 +35,8 @@ function setMode(mode) {
   } else if (currentView === 'create') {
     renderCreateView();
   } else {
-    renderDetail();
+    renderTree();
+    renderTaskDetailModal();
   }
   vscode.postMessage({
     command: 'setTaskMode',
@@ -163,7 +164,7 @@ function renderShellViews() {
     renderCreateView();
   } else {
     renderTree();
-    renderDetail();
+    renderTaskDetailModal();
   }
 }
 
@@ -184,6 +185,7 @@ function applyTaskState(nextState, keepListItem = false) {
   taskState = nextState || taskState;
   taskItems = Array.isArray(taskState.items) ? taskState.items : [];
   taskState.workflows = Array.isArray(taskState.workflows) ? taskState.workflows : [];
+  taskState.currentWorkflow = taskState.currentWorkflow || undefined;
   currentMode = taskState.mode || currentMode;
   if (currentView === 'create') {
     ensureCreateWorkflowSelection();
@@ -209,7 +211,7 @@ function updateDocumentsFolderLabel() {
 
 function refreshDetailView() {
   renderTree();
-  renderDetail();
+  renderTaskDetailModal();
 }
 
 function formatDateTime(value) {

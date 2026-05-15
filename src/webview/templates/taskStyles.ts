@@ -446,6 +446,499 @@ export const taskStyles = [
   rule('.status-ready, .status-sync, .status-running', 'bg-[var(--vscode-inputValidation-infoBackground)] text-[var(--vscode-inputValidation-infoForeground)] border-color-[var(--vscode-inputValidation-infoBorder)]'),
   rule('.status-missing, .status-un-sync', 'bg-[var(--vscode-inputValidation-warningBackground)] text-[var(--vscode-inputValidation-warningForeground)] border-color-[var(--vscode-inputValidation-warningBorder)]'),
   rule('.status-unknown', 'bg-[var(--vscode-textBlockQuote-background)] text-[var(--vscode-descriptionForeground)] border-color-[var(--vscode-panel-border)]'),
+  rule('.status-failed', 'bg-[var(--vscode-inputValidation-errorBackground)] text-[var(--vscode-inputValidation-errorForeground)] border-color-[var(--vscode-inputValidation-errorBorder)]'),
+  rule('.status-skipped', 'bg-[var(--vscode-textBlockQuote-background)] text-[var(--vscode-descriptionForeground)] border-color-[var(--vscode-panel-border)]'),
+  rule('.status-completed', 'bg-[rgba(34,_197,_94,_0.16)] text-[#4ade80] border-color-[rgba(34,_197,_94,_0.58)]'),
+
+  raw(`
+.task-tree {
+  position: relative;
+}
+
+.task-detail-view {
+  display: block;
+}
+
+.task-detail-view[hidden] {
+  display: none;
+}
+
+.task-detail-view .task-tree-block {
+  min-height: calc(100vh - 118px);
+}
+
+.task-tree-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 2px;
+  background: var(--vscode-editorWidget-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+}
+
+.task-tree-zoom-controls button {
+  min-width: 28px;
+  height: 26px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.task-tree-zoom-controls button:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground);
+  border-color: var(--vscode-panel-border);
+}
+
+.task-tree-zoom-level {
+  min-width: 44px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  text-align: center;
+  user-select: none;
+}
+
+.workflow-detail-canvas {
+  min-width: 720px;
+  min-height: 620px;
+  color: #f4f4f7;
+}
+
+.workflow-detail-actionbar {
+  position: sticky;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -72px;
+  padding: 0 18px 18px;
+  pointer-events: none;
+}
+
+.workflow-detail-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 7px;
+  background: rgba(7, 7, 17, 0.88);
+  border: 1px solid rgba(150, 150, 170, 0.22);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+  pointer-events: auto;
+}
+
+.workflow-run-message {
+  max-width: 260px;
+  overflow: hidden;
+  color: rgba(235, 235, 245, 0.7);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-run-button {
+  min-width: 112px;
+  padding: 9px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(64, 68, 78, 0.96);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.workflow-run-button:hover:not(:disabled) {
+  background: rgba(82, 88, 102, 0.98);
+}
+
+.workflow-run-button.running {
+  color: #f87171;
+  border-color: rgba(248, 113, 113, 0.5);
+}
+
+.workflow-run-button.finished {
+  color: #4ade80;
+  border-color: rgba(74, 222, 128, 0.52);
+}
+
+.workflow-detail-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid rgba(150, 150, 170, 0.2);
+  background: rgba(7, 7, 17, 0.92);
+}
+
+.workflow-detail-heading,
+.workflow-detail-file,
+.workflow-detail-sublabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-detail-heading {
+  min-width: 0;
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.workflow-detail-file {
+  max-width: 240px;
+  color: rgba(235, 235, 245, 0.62);
+  font-size: 12px;
+  font-family: var(--vscode-editor-font-family);
+}
+
+.workflow-detail-body {
+  min-height: 560px;
+  padding: 40px 28px 56px;
+  display: flex;
+  justify-content: center;
+}
+
+.workflow-detail-zoom-surface {
+  transform-origin: top center;
+}
+
+.workflow-detail-tree {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: max-content;
+}
+
+.workflow-detail-empty {
+  margin: 80px auto;
+  color: rgba(235, 235, 245, 0.62);
+  font-size: 13px;
+}
+
+.workflow-detail-empty.compact {
+  margin: 18px;
+}
+
+.workflow-detail-connector {
+  width: 0;
+  height: 38px;
+  border-left: 1px dashed rgba(218, 214, 232, 0.52);
+}
+
+.workflow-detail-block-wrap {
+  position: relative;
+  display: flex;
+  width: 190px;
+  flex-shrink: 0;
+  flex-direction: column;
+  align-items: center;
+  color: #f4f4f7;
+}
+
+.workflow-detail-block-wrap.step-wrap {
+  padding: 0;
+  background: transparent;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.workflow-detail-block-wrap.step-wrap:hover:not(:disabled) {
+  background: transparent;
+}
+
+.workflow-detail-block-wrap.step-wrap:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.workflow-detail-card {
+  position: relative;
+  display: flex;
+  width: 112px;
+  height: 112px;
+  align-items: center;
+  justify-content: center;
+  background: rgba(45, 45, 48, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+  transition: border-color 0.15s, transform 0.1s, box-shadow 0.15s;
+}
+
+.workflow-detail-block-wrap.step-wrap:hover .workflow-detail-card,
+.workflow-detail-block-wrap.selected .workflow-detail-card,
+.workflow-detail-block-wrap.selected .workflow-detail-parallel {
+  border-color: #d5d6ff;
+  outline: 2px solid rgba(127, 139, 255, 0.35);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px rgba(127, 139, 255, 0.16), 0 14px 34px rgba(0, 0, 0, 0.34);
+  transform: translateY(-1px);
+}
+
+.workflow-detail-card.status-ready,
+.workflow-detail-card.status-sync {
+  border-color: rgba(34, 197, 94, 0.72);
+}
+
+.workflow-detail-card.status-running {
+  border-color: rgba(245, 158, 11, 0.42);
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.16), 0 14px 34px rgba(0, 0, 0, 0.34);
+}
+
+.workflow-detail-card.status-missing,
+.workflow-detail-card.status-un-sync {
+  border-color: rgba(245, 158, 11, 0.7);
+}
+
+.workflow-detail-card.status-failed {
+  border-color: var(--vscode-inputValidation-errorBorder);
+}
+
+.workflow-detail-canvas.run-running .workflow-detail-card {
+  border-color: rgba(245, 158, 11, 0.42);
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.16), 0 14px 34px rgba(0, 0, 0, 0.34);
+}
+
+.workflow-detail-running-border {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  border-radius: 8px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.workflow-detail-running-border svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.workflow-detail-running-border rect {
+  fill: none;
+  stroke: #fbbf24;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 24 76;
+  stroke-dashoffset: 0;
+  filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.78));
+  vector-effect: non-scaling-stroke;
+  will-change: stroke-dashoffset;
+  animation: workflow-border-track 1.9s linear infinite;
+}
+
+.workflow-detail-card.status-running .workflow-detail-running-border,
+.workflow-detail-canvas.run-running .workflow-detail-card .workflow-detail-running-border {
+  opacity: 1;
+}
+
+.workflow-detail-canvas.run-finished .workflow-detail-card,
+.workflow-detail-canvas.run-finished .workflow-detail-parallel {
+  border-color: rgba(34, 197, 94, 0.88);
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.18), 0 14px 34px rgba(0, 0, 0, 0.34);
+}
+
+.workflow-detail-completed-icon {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  z-index: 3;
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  background: #22c55e;
+  border: 2px solid rgba(7, 7, 17, 0.94);
+  border-radius: 999px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
+}
+
+.workflow-detail-completed-icon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.6;
+}
+
+@keyframes workflow-border-track {
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+.workflow-detail-icon {
+  display: inline-flex;
+  width: 46px;
+  height: 46px;
+  align-items: center;
+  justify-content: center;
+  color: #f7f7fb;
+}
+
+.workflow-detail-icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.workflow-detail-status {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+}
+
+.workflow-detail-label {
+  display: -webkit-box;
+  max-width: 190px;
+  min-height: 34px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  margin-top: 13px;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+  word-break: break-word;
+}
+
+.workflow-detail-sublabel {
+  max-width: 190px;
+  margin-top: 4px;
+  color: rgba(235, 235, 245, 0.62);
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.workflow-detail-block-wrap.parallel-wrap {
+  width: auto;
+}
+
+.workflow-detail-parallel {
+  position: relative;
+  min-width: 240px;
+  padding: 14px 16px 16px;
+  background: rgba(45, 45, 48, 0.4);
+  border: 1px dashed rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  transition: border-color 0.15s, transform 0.1s, box-shadow 0.15s;
+}
+
+.workflow-detail-parallel:hover {
+  border-color: #d5d6ff;
+}
+
+.workflow-detail-parallel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: rgba(235, 235, 245, 0.62);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.workflow-detail-parallel-children {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 28px;
+}
+
+.workflow-detail-parallel.status-ready,
+.workflow-detail-parallel.status-sync {
+  border-color: rgba(34, 197, 94, 0.72);
+}
+
+.workflow-detail-parallel.status-failed {
+  border-color: var(--vscode-inputValidation-errorBorder);
+}
+
+.task-detail-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.54);
+}
+
+.task-detail-modal {
+  display: flex;
+  width: min(860px, 96vw);
+  max-height: min(760px, 92vh);
+  flex-direction: column;
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+}
+
+.task-detail-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.task-detail-modal-header h2 {
+  margin-bottom: 6px;
+}
+
+.task-detail-modal-close {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  padding: 0;
+  background: transparent;
+  color: var(--vscode-icon-foreground);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.task-detail-modal-close:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground);
+  border-color: var(--vscode-panel-border);
+}
+
+.task-detail-modal-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px;
+}
+
+.workflow-step-config {
+  margin-top: 14px;
+}
+`),
 
   rule('.detail-header', 'mb-[16px]'),
   rule('.detail-header h2', 'mb-[6px]'),

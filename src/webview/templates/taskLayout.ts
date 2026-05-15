@@ -106,19 +106,21 @@ export const taskLayout = `<div class="task-container">
     </section>
   </main>
 
-  <main class="task-manager-grid" id="taskDetailView" hidden>
+  <main class="task-detail-view" id="taskDetailView" hidden>
     <section class="task-block task-tree-block" aria-label="Task process tree">
       <div class="block-header">
         <div>
           <h2>Process</h2>
           <p id="taskDocumentsFolder" class="block-meta">Loading...</p>
         </div>
+        <div class="task-tree-zoom-controls" aria-label="Process tree zoom controls">
+          <button id="taskTreeZoomOut" type="button" title="Zoom out" aria-label="Zoom out">-</button>
+          <span id="taskTreeZoomLevel" class="task-tree-zoom-level">100%</span>
+          <button id="taskTreeZoomIn" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+          <button id="taskTreeZoomReset" type="button" title="Reset zoom" aria-label="Reset zoom">1:1</button>
+        </div>
       </div>
       <div class="task-tree" id="taskTree"></div>
-    </section>
-
-    <section class="task-block task-detail-block" aria-label="Task node detail">
-      <div id="taskDetail"></div>
     </section>
   </main>
 </div>
