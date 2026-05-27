@@ -253,13 +253,13 @@ export type MainToUi =
   | {
       type: "SPEC_READY";
       spec: CompressedSpec;
-      spex: SpexBundleInfo;
+      nwa: NwaBundleInfo;
     }
   | { type: "FIGMA_COMPONENTS"; names: string[] }
   | { type: "ERROR"; error: string }
   | { type: "PROGRESS"; stage: string };
 
-export interface SpexBundleInfo {
+export interface NwaBundleInfo {
   rootSlug: string;
   manifest: {
     version: string;
@@ -280,7 +280,7 @@ export interface SpexBundleInfo {
 }
 
 export type VsCodeDesignSpecPayload = CompressedSpec & {
-  spex: SpexBundleInfo;
+  nwa: NwaBundleInfo;
 };
 
 export interface SelectionTreeNode {

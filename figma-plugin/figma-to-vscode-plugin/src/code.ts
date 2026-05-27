@@ -39,7 +39,7 @@ import {
   TokenKind,
   UiToMain,
 } from "./types";
-import { buildSpexBundle } from "./spex";
+import { buildNwaBundle } from "./nwa";
 
 const ALLOWED_SELECTION_TYPES: ReadonlyArray<NodeType> = [
   "FRAME",
@@ -106,7 +106,7 @@ function registerCodegenLauncher(): void {
             "// Open the inspect panel's settings menu and pick\n" +
             "// 'Open plugin window' to launch the full UI:\n" +
             "//   - Connection / handshake with VS Code\n" +
-            "//   - Export / Build SpeX bundle / Send / Download\n" +
+            "//   - Export / Build nwa bundle / Send / Download\n" +
             "//   - Tokens, Assets, Report\n" +
             "//   - Settings -> Component Records Manager",
           language: "PLAINTEXT",
@@ -292,9 +292,9 @@ async function handleUiMessage(msg: UiToMain): Promise<void> {
         ]);
         post({ type: "PROGRESS", stage: "Building compressed spec…" });
         const spec = await buildCompressedSpec(node, mappings, components, tokens);
-        post({ type: "PROGRESS", stage: "Building SpeX export bundle…" });
-        const spex = await buildSpexBundle(node, mappings);
-        post({ type: "SPEC_READY", spec, spex });
+        post({ type: "PROGRESS", stage: "Building nwa export bundle…" });
+        const nwa = await buildNwaBundle(node, mappings);
+        post({ type: "SPEC_READY", spec, nwa });
         return;
       }
 

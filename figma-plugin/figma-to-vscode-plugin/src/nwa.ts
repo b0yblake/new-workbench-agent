@@ -1,7 +1,5 @@
-// spex.ts — SpeX export bundle builder.
+// nwa.ts — nwa export bundle builder.
 //
-// Converts a Figma selection into the multi-file SpeX format documented at
-// https://makespek.vercel.app/docs/features/export-design-specs/.
 //
 // Output structure:
 //
@@ -29,18 +27,18 @@ import type { ComponentMapping } from "./types";
 // Public types
 // ---------------------------------------------------------------------------
 
-export type SpexFile =
+export type NwaFile =
   | { kind: "text"; content: string }
   | { kind: "binary"; base64: string };
 
-export interface SpexBundle {
+export interface NwaBundle {
   rootSlug: string;
   manifest: {
     version: string;
     exportDate: string;
     files: string[];
   };
-  files: Record<string, SpexFile>;
+  files: Record<string, NwaFile>;
   stats: {
     nodes: number;
     uniqueComponents: number;
@@ -57,7 +55,7 @@ export interface SpexBundle {
 // Builder
 // ---------------------------------------------------------------------------
 
-const SPEX_VERSION = "1.0";
+const NWA_VERSION = "1.0";
 const ICON_MAX = 80;
 const ICON_NAME_RE =
   /(^|[\/_\-\s])(icon|close|check|checkmark|chevron|chevron-up|chevron-down|chevron-left|chevron-right|arrow|arrow-up|arrow-down|arrow-left|arrow-right|plus|minus|search|menu|dots|more|x|x-close|chevron-selector-vertical)([\/_\-\s]|$)/i;
@@ -85,10 +83,10 @@ interface Ctx {
   matchedCount: number;
 }
 
-export async function buildSpexBundle(
+export async function buildNwaBundle(
   root: SceneNode,
   mappings: ReadonlyArray<ComponentMapping>
-): Promise<SpexBundle> {
+): Promise<NwaBundle> {
   const ctx: Ctx = {
     mappings,
     fills: new Map(),
@@ -109,7 +107,7 @@ export async function buildSpexBundle(
     /*isRoot*/ true
   );
 
-  const files: Record<string, SpexFile> = {};
+  const files: Record<string, NwaFile> = {};
   const fileList: string[] = [];
 
   // ---- frame.yaml ---------------------------------------------------------
@@ -175,7 +173,7 @@ export async function buildSpexBundle(
   // ---- manifest.yaml + README.md ------------------------------------------
   const exportDate = new Date().toISOString();
   const manifest = {
-    version: SPEX_VERSION,
+    version: NWA_VERSION,
     exportDate,
     files: ["frame.yaml", ...fileList.filter((f) => f !== "frame.yaml")],
   };
@@ -813,11 +811,11 @@ function dumpYaml(value: unknown): string {
   });
 }
 
-function textFile(content: string): SpexFile {
+function textFile(content: string): NwaFile {
   return { kind: "text", content };
 }
 
-function binaryFile(base64: string): SpexFile {
+function binaryFile(base64: string): NwaFile {
   return { kind: "binary", base64 };
 }
 
@@ -877,11 +875,11 @@ function uint8ToBase64(bytes: Uint8Array): string {
 }
 
 function README(
-  m: SpexBundle["manifest"],
+  m: NwaBundle["manifest"],
   ctx: Ctx
 ): string {
   return [
-    `# SpeX Design Specs`,
+    `# nwa Design Specs`,
     ``,
     `**Export Mode**: Shared Instance References`,
     `**Exported**: ${m.exportDate}`,

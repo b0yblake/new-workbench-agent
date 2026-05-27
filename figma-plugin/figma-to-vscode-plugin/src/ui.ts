@@ -18,7 +18,7 @@ import {
   PLUGIN_NAME,
   PLUGIN_VERSION,
   SelectionTreeNode,
-  SpexBundleInfo,
+  NwaBundleInfo,
   UiToMain,
   VsCodeDesignSpecPayload,
   WsIn,
@@ -64,7 +64,7 @@ interface AppState {
     tokens: FETokenCatalogItem[];
   };
   lastSpec: CompressedSpec | null;
-  lastSpex: SpexBundleInfo | null;
+  lastNwa: NwaBundleInfo | null;
   lastUnmatched: Array<{
     nodeId: string;
     name: string;
@@ -82,7 +82,7 @@ const state: AppState = {
   mappings: [],
   catalogs: { components: [], tokens: [] },
   lastSpec: null,
-  lastSpex: null,
+  lastNwa: null,
   lastUnmatched: [],
   ws: { status: "offline" },
 };
@@ -481,17 +481,17 @@ function renderReviewTable(): void {
   }
 }
 
-async function downloadSpexAsZip(
-  spex: SpexBundleInfo,
+async function downloadNwaAsZip(
+  nwa: NwaBundleInfo,
   setStatus: (t: string, k?: "info" | "ok" | "warn" | "err") => void
 ): Promise<void> {
   try {
-    setStatus("Packing SpeX bundle into ZIP…", "info");
+    setStatus("Packing nwa bundle into ZIP…", "info");
     const zip = new JSZip();
-    const root = zip.folder(spex.rootSlug);
+    const root = zip.folder(nwa.rootSlug);
     if (!root) throw new Error("Failed to create zip folder");
 
-    for (const [path, file] of Object.entries(spex.files)) {
+    for (const [path, file] of Object.entries(nwa.files)) {
       if (file.kind === "text") {
         root.file(path, file.content);
       } else {
@@ -503,17 +503,17 @@ async function downloadSpexAsZip(
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${spex.rootSlug}.zip`;
+    a.download = `${nwa.rootSlug}.zip`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     window.setTimeout(() => URL.revokeObjectURL(url), 1500);
 
     setStatus(
-      `Downloaded ${spex.rootSlug}.zip (${formatBytes(blob.size)}).\n` +
-        `  components: ${spex.stats.uniqueComponents} · icons: ${spex.stats.icons} · ` +
-        `fills: ${spex.stats.fills} · strokes: ${spex.stats.strokes} · ` +
-        `effects: ${spex.stats.effects} · type: ${spex.stats.typography}`,
+      `Downloaded ${nwa.rootSlug}.zip (${formatBytes(blob.size)}).\n` +
+        `  components: ${nwa.stats.uniqueComponents} · icons: ${nwa.stats.icons} · ` +
+        `fills: ${nwa.stats.fills} · strokes: ${nwa.stats.strokes} · ` +
+        `effects: ${nwa.stats.effects} · type: ${nwa.stats.typography}`,
       "ok"
     );
   } catch (err) {
@@ -525,11 +525,11 @@ async function downloadSpexAsZip(
 }
 
 function getLastVsCodePayload(): VsCodeDesignSpecPayload | null {
-  if (!state.lastSpex || !state.lastSpec) {
+  if (!state.lastNwa || !state.lastSpec) {
     return null;
   }
 
-  return { ...state.lastSpec, spex: state.lastSpex };
+  return { ...state.lastSpec, nwa: state.lastNwa };
 }
 
 function downloadVsCodePayloadAsJson(
@@ -546,7 +546,7 @@ function downloadVsCodePayloadAsJson(
     const blob = new Blob([json], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    const filename = `${payload.spex.rootSlug}.json`;
+    const filename = `${payload.nwa.rootSlug}.json`;
     a.href = url;
     a.download = filename;
     document.body.appendChild(a);
@@ -566,7 +566,7 @@ function downloadVsCodePayloadAsJson(
   }
 }
 
-function sendSpexToVsCode(
+function sendNwaToVsCode(
   setStatus: (t: string, k?: "info" | "ok" | "warn" | "err") => void
 ): void {
   const payload = getLastVsCodePayload();
@@ -585,9 +585,9 @@ function sendSpexToVsCode(
     payload,
   });
   setStatus(
-    `Sent SpeX bundle to VS Code (id=${requestId}, ` +
-      `${Object.keys(payload.spex.files).length} files, ` +
-      `${payload.spex.stats.uniqueComponents} components).`,
+    `Sent nwa bundle to VS Code (id=${requestId}, ` +
+      `${Object.keys(payload.nwa.files).length} files, ` +
+      `${payload.nwa.stats.uniqueComponents} components).`,
     "ok"
   );
 }
@@ -1642,7 +1642,7 @@ window.addEventListener("message", (event: MessageEvent) => {
 
     case "SPEC_READY": {
       state.lastSpec = msg.spec;
-      state.lastSpex = msg.spex;
+      state.lastNwa = msg.nwa;
       updateExportButtons();
       renderTokens(msg.spec.tokens);
       renderAssets(msg.spec);
@@ -1651,15 +1651,15 @@ window.addEventListener("message", (event: MessageEvent) => {
       const action = exportAction;
       exportAction = null;
       if (action === "send") {
-        sendSpexToVsCode(setReviewStatus);
+        sendNwaToVsCode(setReviewStatus);
       } else if (action === "download") {
-        void downloadSpexAsZip(msg.spex, setReviewStatus);
+        void downloadNwaAsZip(msg.nwa, setReviewStatus);
       } else if (action === "download-json") {
         downloadVsCodePayloadAsJson(setReviewStatus);
       } else {
         setExportStatus(
-          `Spec built: ${msg.spex.stats.uniqueComponents} components, ` +
-            `${msg.spex.stats.icons} icons, ${msg.spec.tokens.length} tokens.`,
+          `Spec built: ${msg.nwa.stats.uniqueComponents} components, ` +
+            `${msg.nwa.stats.icons} icons, ${msg.spec.tokens.length} tokens.`,
           "ok"
         );
       }

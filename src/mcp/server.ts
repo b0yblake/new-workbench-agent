@@ -5,7 +5,7 @@ import { registerFigmaTools } from './tools/figmaTools';
 async function main(): Promise<void> {
   const figmaContextPath = process.env.FIGMA_CONTEXT_PATH ?? '';
   const server = new McpServer({
-    name: 'spex-mcp',
+    name: 'nwa-mcp',
     version: process.env.npm_package_version ?? '0.1.0'
   });
 
