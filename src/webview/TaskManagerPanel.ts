@@ -1,19 +1,13 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as fsPromises from 'fs/promises';
-import * as os from 'os';
-import * as path from 'path';
 import { ConfigService } from '../services/ConfigService';
 import { FileSystemService } from '../services/FileSystemService';
 import { TaskManagerService } from '../services/TaskManagerService';
-import { WorkflowRunError, WorkflowRunner } from '../features/workflows/WorkflowRunner';
-import type { WorkflowFile, WorkflowStepBlock, WorkflowStatus } from '../features/workflows/types';
+import { ClaudeCodeTerminalService } from '../features/taskManager/ClaudeCodeTerminalService';
+import { FigmaBridgeDetailAction, FigmaBridgeDetailService } from '../features/taskManager/FigmaBridgeDetailService';
+import { TaskWorkflowExecutionService } from '../features/taskManager/TaskWorkflowExecutionService';
+import type { WorkflowStatus } from '../features/workflows/types';
 import { logger } from '../utils/logger';
-import { openExternalTerminal } from '../utils/externalTerminal';
-import { COMMANDS } from '../utils/constants';
 import { FIGMA_ACCESS_TOKEN_SECRET_KEY } from '../features/workflows/settingsData';
-import { FigmaBridgeStatus } from '../figmaBridge/types';
-import { getFigmaContextPathFromGlobalStorageUri, readLatestFigmaContextFromPath, StoredFigmaContext } from '../shared/figmaStore';
 import {
   TaskDocumentUpload,
   TaskItemCreateRequest,
@@ -31,40 +25,17 @@ import {
 } from '../models/TaskManager';
 import { getTaskManagerContent } from './taskManagerContent';
 
-interface TaskWorkflowExecutionContext {
-  request: TaskWorkflowRunRequest;
-}
-
-interface TaskFigmaBridgeItem {
-  id?: string;
-  name?: string;
-  type?: string;
-  width?: number;
-  height?: number;
-  parentName?: string;
-}
-
-interface TaskFigmaBridgeDetail {
-  status: FigmaBridgeStatus;
-  contextPath?: string;
-  receivedAt?: string;
-  fileName?: string;
-  fileKey?: string;
-  pageName?: string;
-  items: TaskFigmaBridgeItem[];
-}
-
 export class TaskManagerPanel {
   public static currentPanel: TaskManagerPanel | undefined;
   private readonly _panel: vscode.WebviewPanel;
   private _disposables: vscode.Disposable[] = [];
   private taskManagerService: TaskManagerService;
+  private figmaBridgeDetailService: FigmaBridgeDetailService;
+  private workflowExecutionService: TaskWorkflowExecutionService;
+  private claudeCodeTerminalService = new ClaudeCodeTerminalService();
   private mode: TaskManagerMode;
   private currentItemId?: string;
   private currentItemType?: TaskItemType;
-  private activeClaudeRunCleanup?: () => void;
-  private workflowRunner = new WorkflowRunner();
-  private isTaskWorkflowRunning = false;
 
   public static createOrShow(
     extensionUri: vscode.Uri,
@@ -101,12 +72,25 @@ export class TaskManagerPanel {
     extensionUri: vscode.Uri,
     configService?: ConfigService,
     mode: TaskManagerMode = 'task',
-    private readonly storageUri?: vscode.Uri,
+    storageUri?: vscode.Uri,
     private readonly secretStorage?: vscode.SecretStorage
   ) {
     this._panel = panel;
     this.mode = mode;
     this.taskManagerService = new TaskManagerService(configService, new FileSystemService(), storageUri, extensionUri);
+    this.figmaBridgeDetailService = new FigmaBridgeDetailService(storageUri);
+    this.workflowExecutionService = new TaskWorkflowExecutionService(this.taskManagerService, {
+      onPrepared: data => this._panel.webview.postMessage({
+        command: 'taskWorkflowRunPrepared',
+        data
+      }),
+      onState: state => this.applyStateContext(state),
+      onStatus: (blockId, status) => this.postTaskWorkflowStatus(blockId, status),
+      onMessage: message => this._panel.webview.postMessage({
+        command: 'taskWorkflowRunMessage',
+        data: { message }
+      })
+    });
 
     this._panel.webview.html = getTaskManagerContent(this.mode);
     this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
@@ -365,15 +349,9 @@ export class TaskManagerPanel {
     }
   }
 
-  private async handleFigmaBridgeDetail(action: 'refresh' | 'start' | 'show' | 'stop'): Promise<void> {
+  private async handleFigmaBridgeDetail(action: FigmaBridgeDetailAction): Promise<void> {
     try {
-      if (action === 'start') {
-        await vscode.commands.executeCommand(COMMANDS.FIGMA_MCP_BRIDGE_START);
-      } else if (action === 'stop') {
-        await vscode.commands.executeCommand(COMMANDS.FIGMA_MCP_BRIDGE_STOP);
-      }
-
-      const detail = await this.getFigmaBridgeDetail();
+      const detail = await this.figmaBridgeDetailService.loadDetail(action);
       this._panel.webview.postMessage({
         command: 'figmaBridgeDetail',
         data: detail
@@ -385,37 +363,6 @@ export class TaskManagerPanel {
         data: { message: (error as Error).message }
       });
     }
-  }
-
-  private async getFigmaBridgeDetail(): Promise<TaskFigmaBridgeDetail> {
-    const status = await this.getFigmaBridgeStatus();
-    const contextPath = this.storageUri
-      ? getFigmaContextPathFromGlobalStorageUri(this.storageUri)
-      : undefined;
-    const context = contextPath
-      ? await readLatestFigmaContextFromPath(contextPath)
-      : undefined;
-
-    return {
-      status,
-      contextPath,
-      receivedAt: context?.receivedAt,
-      fileName: findFirstStringByKey(context?.payload, ['fileName']),
-      fileKey: findFirstStringByKey(context?.payload, ['fileKey']),
-      pageName: findFirstStringByKey(context?.payload, ['pageName']),
-      items: context ? flattenFigmaBridgeItems(context).slice(0, 200) : []
-    };
-  }
-
-  private async getFigmaBridgeStatus(): Promise<FigmaBridgeStatus> {
-    const status = await vscode.commands.executeCommand<FigmaBridgeStatus>(COMMANDS.FIGMA_MCP_BRIDGE_GET_STATUS);
-
-    return status || {
-      running: false,
-      connected: false,
-      port: 8080,
-      url: 'ws://localhost:8080'
-    };
   }
 
   private async handleGetTaskMarkdown(request?: TaskMarkdownRequest): Promise<void> {
@@ -470,135 +417,36 @@ export class TaskManagerPanel {
 
   private async handleRunTaskWorkflow(request?: TaskWorkflowRunRequest): Promise<void> {
     const runRequest = this.withTaskContext(request || {});
+    const result = await this.workflowExecutionService.run(runRequest);
 
-    if (this.isTaskWorkflowRunning) {
+    if (result.outcome === 'already-running') {
       this._panel.webview.postMessage({
         command: 'taskWorkflowRunFailed',
-        data: { message: 'A workflow run is already in progress.' }
+        data: { message: result.message }
       });
       return;
     }
 
-    let workflow: WorkflowFile | undefined;
-    this.isTaskWorkflowRunning = true;
-
-    try {
-      const loaded = await this.taskManagerService.getTaskWorkflowForRun(runRequest);
-      workflow = loaded.workflow;
-      this.applyStateContext(loaded.state);
-      this._panel.webview.postMessage({
-        command: 'taskWorkflowRunPrepared',
-        data: { workflow, state: loaded.state }
-      });
-
-      await this.workflowRunner.run<TaskWorkflowExecutionContext>(workflow, {
-        context: { request: runRequest },
-        executor: {
-          execute: async (step, context) => this.executeTaskWorkflowStep(step, context.request)
-        },
-        preserveSuccessfulStep: step => step.stepType === 'review_human',
-        onStatus: (blockId, status) => this.postTaskWorkflowStatus(blockId, status),
-        onMessage: message => this._panel.webview.postMessage({
-          command: 'taskWorkflowRunMessage',
-          data: { message }
-        })
-      });
-
-      const saved = await this.taskManagerService.saveTaskWorkflow(runRequest, workflow);
-      this.applyStateContext(saved.state);
+    if (result.outcome === 'completed') {
       this._panel.webview.postMessage({
         command: 'taskWorkflowRunComplete',
-        data: saved
+        data: result.data
       });
       vscode.window.showInformationMessage('NWA: Workflow completed.');
-    } catch (error) {
-      logger.error('Error running task workflow', error as Error);
-      let savedState: Awaited<ReturnType<TaskManagerService['saveTaskWorkflow']>> | undefined;
+      return;
+    }
 
-      if (workflow) {
-        try {
-          savedState = await this.taskManagerService.saveTaskWorkflow(runRequest, workflow);
-          this.applyStateContext(savedState.state);
-        } catch (saveError) {
-          logger.warn(`Unable to save failed workflow state: ${(saveError as Error).message}`);
-        }
+    logger.error('Error running task workflow', result.error);
+    this._panel.webview.postMessage({
+      command: 'taskWorkflowRunFailed',
+      data: {
+        message: result.message,
+        blockId: result.blockId,
+        state: result.state,
+        workflow: result.workflow
       }
-
-      this._panel.webview.postMessage({
-        command: 'taskWorkflowRunFailed',
-        data: {
-          message: (error as Error).message,
-          blockId: error instanceof WorkflowRunError ? error.blockId : undefined,
-          state: savedState?.state,
-          workflow: savedState?.workflow
-        }
-      });
-      vscode.window.showErrorMessage(`Workflow failed: ${(error as Error).message}`);
-    } finally {
-      this.isTaskWorkflowRunning = false;
-    }
-  }
-
-  private async executeTaskWorkflowStep(
-    step: WorkflowStepBlock,
-    request: TaskWorkflowRunRequest
-  ): Promise<{ status?: 'success' | 'skipped'; message?: string }> {
-    switch (step.stepType) {
-      case 'collect_document':
-        return this.executeCollectDocumentStep(request);
-      case 'collect_figma':
-        return this.executeCollectFigmaStep();
-      case 'collect_jira':
-        return this.executeCollectJiraStep(request);
-      case 'review_human':
-        return this.executeReviewHumanStep();
-      default:
-        return this.executeUnsupportedWorkflowStep(step);
-    }
-  }
-
-  private async executeCollectDocumentStep(
-    request: TaskWorkflowRunRequest
-  ): Promise<{ status: 'success'; message: string }> {
-    const result = await this.taskManagerService.judgeTaskDocumentsWithClaude(request);
-    return {
-      status: 'success',
-      message: result.message || 'Document judgment passed.'
-    };
-  }
-
-  private async executeCollectFigmaStep(): Promise<{ status: 'success'; message: string }> {
-    return {
-      status: 'success',
-      message: 'Figma design marked completed.'
-    };
-  }
-
-  private async executeCollectJiraStep(
-    request: TaskWorkflowRunRequest
-  ): Promise<{ status: 'success'; message: string }> {
-    const result = await this.taskManagerService.readJiraTicket({
-      ...request,
-      link: String(request.jiraLink || '').trim()
     });
-    this.applyStateContext(result.state);
-    return {
-      status: 'success',
-      message: `Jira ticket collected: ${result.connection.ticket?.title || result.connection.link}`
-    };
-  }
-
-  private async executeReviewHumanStep(): Promise<never> {
-    throw new Error('Review by Human must be marked done manually before the workflow can continue.');
-  }
-
-  private async executeUnsupportedWorkflowStep(
-    step: WorkflowStepBlock
-  ): Promise<{ status: 'skipped'; message: string }> {
-    return {
-      status: 'skipped',
-      message: `Step "${step.title}" is not automated yet, so it was skipped.`
-    };
+    vscode.window.showErrorMessage(`Workflow failed: ${result.message}`);
   }
 
   private postTaskWorkflowStatus(blockId: string, status: WorkflowStatus): void {
@@ -668,7 +516,15 @@ export class TaskManagerPanel {
       }
 
       this.applyStateContext(result.state);
-      await this.openClaudeCodeTerminal(workspaceFolder, markdownPath, result.state.currentItem?.id);
+      await this.claudeCodeTerminalService.open(
+        workspaceFolder,
+        markdownPath,
+        result.state.currentItem?.id,
+        event => this._panel.webview.postMessage({
+          command: 'taskMarkdownRunStopped',
+          data: event
+        })
+      );
 
       try {
         await vscode.env.clipboard.writeText(content);
@@ -692,159 +548,6 @@ export class TaskManagerPanel {
         data: { message: (error as Error).message }
       });
     }
-  }
-
-  private async openClaudeCodeTerminal(
-    workspaceFolder: vscode.Uri,
-    markdownPath: string,
-    itemId?: string
-  ): Promise<void> {
-    const tempDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'agentkit-claude-run-'));
-    const donePath = path.join(tempDir, 'done.flag');
-    const scriptPath = await this.createClaudeRunScript(tempDir, donePath, workspaceFolder, markdownPath, itemId);
-
-    this.disposeActiveClaudeRun();
-    this.watchClaudeRunDone(donePath, tempDir, markdownPath);
-
-    try {
-      await openExternalTerminal(scriptPath);
-    } catch (error) {
-      this.disposeActiveClaudeRun();
-      try {
-        await fsPromises.rm(tempDir, { recursive: true, force: true });
-      } catch {
-        // best-effort cleanup
-      }
-      throw error;
-    }
-  }
-
-  private async createClaudeRunScript(
-    tempDir: string,
-    donePath: string,
-    workspaceFolder: vscode.Uri,
-    markdownPath: string,
-    itemId?: string
-  ): Promise<string> {
-    const claudeCommand = this.getClaudeCodeCommand(markdownPath);
-    const cwd = workspaceFolder.fsPath.replace(/\\/g, '/');
-    const bashDonePath = donePath.replace(/\\/g, '/');
-    const title = itemId ? `NWA Claude Code: ${itemId}` : 'NWA Claude Code';
-
-    const bashScript = `#!/usr/bin/env bash
-      export PATH="$HOME/.local/bin:$PATH"
-      cd "${cwd}"
-      ${claudeCommand}
-      status=$?
-      : > "${bashDonePath}"
-      exit $status
-      `;
-
-    const bashScriptPath = path.join(tempDir, 'run-claude.sh');
-    await fsPromises.writeFile(bashScriptPath, bashScript, 'utf8');
-
-    if (process.platform !== 'win32') {
-      await fsPromises.chmod(bashScriptPath, 0o755);
-      return bashScriptPath;
-    }
-
-    const bashPath = this.getBashShellPath();
-    const wrapperPath = path.join(tempDir, 'run-claude.cmd');
-    const wrapper = `@echo off\r\ntitle ${title}\r\n"${bashPath}" "${bashScriptPath}"\r\n`;
-    await fsPromises.writeFile(wrapperPath, wrapper, 'utf8');
-    return wrapperPath;
-  }
-
-  private watchClaudeRunDone(donePath: string, tempDir: string, markdownPath: string): void {
-    let fired = false;
-    const interval = setInterval(async () => {
-      try {
-        await fsPromises.access(donePath);
-      } catch {
-        return;
-      }
-
-      if (fired) {
-        return;
-      }
-      fired = true;
-      clearInterval(interval);
-      this.activeClaudeRunCleanup = undefined;
-
-      this._panel.webview.postMessage({
-        command: 'taskMarkdownRunStopped',
-        data: {
-          markdownPath,
-          message: 'Claude Code terminal closed.'
-        }
-      });
-
-      try {
-        await fsPromises.rm(tempDir, { recursive: true, force: true });
-      } catch {
-        // best-effort cleanup
-      }
-    }, 1000);
-
-    this.activeClaudeRunCleanup = () => {
-      clearInterval(interval);
-    };
-  }
-
-  private disposeActiveClaudeRun(): void {
-    this.activeClaudeRunCleanup?.();
-    this.activeClaudeRunCleanup = undefined;
-  }
-
-  private getBashShellPath(): string {
-    const configuredBashPath = process.env.CLAUDE_CODE_GIT_BASH_PATH;
-
-    if (configuredBashPath && fs.existsSync(configuredBashPath)) {
-      return configuredBashPath;
-    }
-
-    if (process.platform !== 'win32') {
-      const shell = process.env.SHELL || '';
-      if (path.basename(shell) === 'bash' && fs.existsSync(shell)) {
-        return shell;
-      }
-
-      for (const candidate of ['/bin/bash', '/usr/bin/bash']) {
-        if (fs.existsSync(candidate)) {
-          return candidate;
-        }
-      }
-
-      return 'bash';
-    }
-
-    const windowsCandidates = [
-      path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe'),
-      path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'usr', 'bin', 'bash.exe'),
-      process.env['ProgramFiles(x86)']
-        ? path.join(process.env['ProgramFiles(x86)'] as string, 'Git', 'bin', 'bash.exe')
-        : undefined,
-      process.env.LOCALAPPDATA
-        ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Git', 'bin', 'bash.exe')
-        : undefined
-    ].filter((candidate): candidate is string => Boolean(candidate));
-
-    return windowsCandidates.find(candidate => fs.existsSync(candidate)) || 'bash.exe';
-  }
-
-  private getClaudeCodeCommand(markdownPath: string): string {
-    const normalizedMarkdownPath = markdownPath.replace(/\\/g, '/');
-    const prompt = [
-      `Read the NWA markdown brief at ${normalizedMarkdownPath}.`,
-      'Implement the requested coding work in this workspace.',
-      'Keep changes scoped to the brief, run relevant verification, and summarize what changed.'
-    ].join(' ');
-
-    return `claude ${this.quoteShellArgument(prompt)}`;
-  }
-
-  private quoteShellArgument(value: string): string {
-    return `'${value.replace(/'/g, "'\\''")}'`;
   }
 
   private async handleOpenJiraInChrome(request?: TaskJiraOpenRequest): Promise<void> {
@@ -954,8 +657,8 @@ export class TaskManagerPanel {
 
   public dispose(): void {
     TaskManagerPanel.currentPanel = undefined;
-    this.disposeActiveClaudeRun();
-    this.workflowRunner.dispose();
+    this.claudeCodeTerminalService.dispose();
+    this.workflowExecutionService.dispose();
     this._panel.dispose();
     while (this._disposables.length) {
       const disposable = this._disposables.pop();
@@ -964,153 +667,4 @@ export class TaskManagerPanel {
       }
     }
   }
-}
-
-function flattenFigmaBridgeItems(context: StoredFigmaContext): TaskFigmaBridgeItem[] {
-  const result: TaskFigmaBridgeItem[] = [];
-  const visited = new WeakSet<Record<string, unknown>>();
-  const roots = extractTopLevelFigmaNodes(context.payload);
-  visitFigmaNodeContainer(roots.length > 0 ? roots : context.payload, undefined, result, visited);
-  return result;
-}
-
-function visitFigmaNodeContainer(
-  value: unknown,
-  parentName: string | undefined,
-  result: TaskFigmaBridgeItem[],
-  visited: WeakSet<Record<string, unknown>>
-): void {
-  if (Array.isArray(value)) {
-    value.forEach(item => visitFigmaNodeContainer(item, parentName, result, visited));
-    return;
-  }
-
-  if (!isRecord(value) || visited.has(value)) {
-    return;
-  }
-
-  visited.add(value);
-
-  if (isFigmaNodeLike(value)) {
-    const dimensions = readNodeDimensions(value);
-    const item: TaskFigmaBridgeItem = {
-      id: readString(value.id) ?? readString(value.nodeId),
-      name: readString(value.name),
-      type: readString(value.type),
-      ...(dimensions.width !== undefined ? { width: dimensions.width } : {}),
-      ...(dimensions.height !== undefined ? { height: dimensions.height } : {}),
-      ...(parentName ? { parentName } : {})
-    };
-
-    result.push(item);
-
-    const nextParentName = item.name ?? parentName;
-    ['children', 'nodes', 'selection', 'selectedNodes'].forEach(key => {
-      visitFigmaNodeContainer(value[key], nextParentName, result, visited);
-    });
-    return;
-  }
-
-  ['selection', 'selectedNodes', 'nodes', 'children', 'node', 'document', 'payload', 'data'].forEach(key => {
-    visitFigmaNodeContainer(value[key], parentName, result, visited);
-  });
-}
-
-function extractTopLevelFigmaNodes(value: unknown): Record<string, unknown>[] {
-  if (Array.isArray(value)) {
-    return value.filter(isRecord);
-  }
-
-  if (!isRecord(value)) {
-    return [];
-  }
-
-  for (const key of ['selection', 'selectedNodes', 'nodes']) {
-    if (Array.isArray(value[key])) {
-      return value[key].filter(isRecord);
-    }
-  }
-
-  for (const key of ['node', 'document', 'payload', 'data']) {
-    const nested = value[key];
-    if (isRecord(nested) && isFigmaNodeLike(nested)) {
-      return [nested];
-    }
-
-    const nestedNodes = extractTopLevelFigmaNodes(nested);
-    if (nestedNodes.length > 0) {
-      return nestedNodes;
-    }
-  }
-
-  return isFigmaNodeLike(value) ? [value] : [];
-}
-
-function findFirstStringByKey(value: unknown, keys: string[], depth = 0): string | undefined {
-  if (depth > 6) {
-    return undefined;
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const match = findFirstStringByKey(item, keys, depth + 1);
-      if (match) {
-        return match;
-      }
-    }
-
-    return undefined;
-  }
-
-  if (!isRecord(value)) {
-    return undefined;
-  }
-
-  for (const key of keys) {
-    const candidate = readString(value[key]);
-    if (candidate) {
-      return candidate;
-    }
-  }
-
-  for (const item of Object.values(value)) {
-    const match = findFirstStringByKey(item, keys, depth + 1);
-    if (match) {
-      return match;
-    }
-  }
-
-  return undefined;
-}
-
-function isFigmaNodeLike(value: Record<string, unknown>): boolean {
-  return (
-    typeof value.id === 'string' ||
-    typeof value.nodeId === 'string' ||
-    (typeof value.name === 'string' && typeof value.type === 'string') ||
-    Array.isArray(value.children)
-  );
-}
-
-function readNodeDimensions(node: Record<string, unknown>): { width?: number; height?: number } {
-  const absoluteBoundingBox = isRecord(node.absoluteBoundingBox) ? node.absoluteBoundingBox : undefined;
-  const bounds = isRecord(node.bounds) ? node.bounds : undefined;
-  const size = isRecord(node.size) ? node.size : undefined;
-
-  return {
-    width: readNumber(node.width) ?? readNumber(absoluteBoundingBox?.width) ?? readNumber(bounds?.width) ?? readNumber(size?.width),
-    height: readNumber(node.height) ?? readNumber(absoluteBoundingBox?.height) ?? readNumber(bounds?.height) ?? readNumber(size?.height)
-  };
-}
-
-function readString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function readNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

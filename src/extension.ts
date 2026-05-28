@@ -5,11 +5,13 @@ import { InstalledAgentsProvider } from './providers/InstalledAgentsProvider';
 import { AvailableAgentsProvider } from './providers/AvailableAgentsProvider';
 import { TaskActionsProvider } from './providers/TaskActionsProvider';
 import { MemoryTreeProvider } from './providers/MemoryTreeProvider';
+import { ComponentBrowserProvider } from './providers/ComponentBrowserProvider';
 import { ConfigService } from './services/ConfigService';
 import { FileSystemService } from './services/FileSystemService';
+import { ComponentScannerService, ScannedComponent } from './services/ComponentScannerService';
 import { MemoryService } from './features/memory/MemoryService';
 import { logger } from './utils/logger';
-import { COMMANDS, TREE_VIEW_IDS, GLOBAL_STATE_KEYS } from './utils/constants';
+import { COMMANDS, CONFIG_KEYS, TREE_VIEW_IDS, GLOBAL_STATE_KEYS } from './utils/constants';
 import { ClaudeContextProvider } from './providers/ClaudeContextProvider';
 import { startFigmaWebSocketBridge } from './figmaBridge/startFigmaWebSocketBridge';
 import { FIGMA_BRIDGE_PORT, FIGMA_BRIDGE_URL, FigmaBridgeStatus, FigmaWebSocketBridge } from './figmaBridge/types';
@@ -75,6 +77,18 @@ export function activate(context: vscode.ExtensionContext) {
     treeViews.push(memoryTreeView);
   }
 
+  const componentBrowserProvider = new ComponentBrowserProvider(
+    new ComponentScannerService(),
+    configService,
+    workspaceRoot
+  );
+  const componentBrowserView = vscode.window.createTreeView(TREE_VIEW_IDS.COMPONENT_BROWSER, {
+    treeDataProvider: componentBrowserProvider,
+    showCollapseAll: true
+  });
+  treeViews.push(componentBrowserView);
+  void componentBrowserProvider.refresh();
+
   context.subscriptions.push(...treeViews);
 
   // Register commands
@@ -88,9 +102,32 @@ export function activate(context: vscode.ExtensionContext) {
     memoryProvider
   });
 
+  registerComponentBrowserCommands(context, componentBrowserProvider, configService, workspaceRoot);
   registerFigmaMcpBridgeCommands(context, nwaOutputChannel);
   registerFigmaMcpServerDefinitionProvider(context);
   void startFigmaBridgeIfNeeded(context, nwaOutputChannel, false);
+
+  // Watch the component-path config so the browser refreshes when the user
+  // edits scan paths from settings UI / settings.json.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration(event => {
+      if (event.affectsConfiguration(CONFIG_KEYS.COMPONENT_PATHS)) {
+        void componentBrowserProvider.refresh();
+      }
+    })
+  );
+
+  // Re-scan when component source files change so the browser stays current
+  // without manual refresh.
+  if (workspaceRoot) {
+    const componentWatcher = vscode.workspace.createFileSystemWatcher(
+      '**/*.{vue,tsx,jsx,svelte,component.ts}'
+    );
+    const onChange = (): void => { void componentBrowserProvider.refresh(); };
+    componentWatcher.onDidCreate(onChange);
+    componentWatcher.onDidDelete(onChange);
+    context.subscriptions.push(componentWatcher);
+  }
 
   // Setup file watchers
   setupFileWatchers(context, installedAgentsProvider);
@@ -99,6 +136,117 @@ export function activate(context: vscode.ExtensionContext) {
   createStatusBarItem(context);
 
   logger.info('AgentKit extension activated successfully');
+}
+
+function registerComponentBrowserCommands(
+  context: vscode.ExtensionContext,
+  provider: ComponentBrowserProvider,
+  configService: ConfigService,
+  workspaceRoot: string | undefined
+): void {
+  // The TreeView items pass themselves as the command argument when invoked
+  // from the context menu. For inline commands (refresh / addPath) there is
+  // no argument; we handle both forms.
+  const resolveComponent = (arg: unknown): ScannedComponent | undefined => {
+    if (arg && typeof arg === 'object' && 'component' in arg) {
+      return (arg as { component: ScannedComponent }).component;
+    }
+    return undefined;
+  };
+  const resolvePathValue = (arg: unknown): string | undefined => {
+    if (arg && typeof arg === 'object' && 'pathValue' in arg) {
+      const value = (arg as { pathValue?: string }).pathValue;
+      return typeof value === 'string' && value.length > 0 ? value : undefined;
+    }
+    if (typeof arg === 'string') {
+      return arg;
+    }
+    return undefined;
+  };
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(COMMANDS.COMPONENTS_REFRESH, async () => {
+      await provider.refresh();
+    }),
+
+    vscode.commands.registerCommand(COMMANDS.COMPONENTS_ADD_PATH, async () => {
+      if (!workspaceRoot) {
+        void vscode.window.showWarningMessage('Open a workspace folder first.');
+        return;
+      }
+      const picked = await vscode.window.showOpenDialog({
+        canSelectFiles: false,
+        canSelectFolders: true,
+        canSelectMany: false,
+        defaultUri: vscode.Uri.file(workspaceRoot),
+        openLabel: 'Add as Component Scan Path'
+      });
+      if (!picked || picked.length === 0) {
+        return;
+      }
+      const absPath = picked[0].fsPath;
+      const rel = path.relative(workspaceRoot, absPath).replace(/\\/g, '/');
+      if (rel.startsWith('..')) {
+        void vscode.window.showWarningMessage('Scan path must live inside the workspace.');
+        return;
+      }
+      await configService.addComponentPath(rel || '.');
+      await provider.refresh();
+      void vscode.window.showInformationMessage(`Added component scan path: ${rel || '.'}`);
+    }),
+
+    vscode.commands.registerCommand(COMMANDS.COMPONENTS_REMOVE_PATH, async (arg: unknown) => {
+      const target = resolvePathValue(arg);
+      const paths = configService.getComponentPaths();
+      let toRemove = target;
+      if (!toRemove) {
+        toRemove = await vscode.window.showQuickPick(paths, {
+          title: 'Remove component scan path',
+          placeHolder: 'Pick the path to remove'
+        });
+      }
+      if (!toRemove) {
+        return;
+      }
+      await configService.removeComponentPath(toRemove);
+      await provider.refresh();
+      void vscode.window.showInformationMessage(`Removed component scan path: ${toRemove}`);
+    }),
+
+    vscode.commands.registerCommand(COMMANDS.COMPONENTS_OPEN_FILE, async (arg: unknown) => {
+      const component = resolveComponent(arg);
+      if (!component) {
+        return;
+      }
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(component.absolutePath));
+      await vscode.window.showTextDocument(doc, { preview: false });
+    }),
+
+    vscode.commands.registerCommand(COMMANDS.COMPONENTS_COPY_PATH, async (arg: unknown) => {
+      const component = resolveComponent(arg);
+      if (!component) {
+        return;
+      }
+      await vscode.env.clipboard.writeText(component.filePath);
+      void vscode.window.showInformationMessage(`Copied path: ${component.filePath}`);
+    }),
+
+    vscode.commands.registerCommand(COMMANDS.COMPONENTS_COPY_IMPORT, async (arg: unknown) => {
+      const component = resolveComponent(arg);
+      if (!component) {
+        return;
+      }
+      // Strip the extension and any leading "src/" so the snippet matches
+      // typical tsconfig alias setups. Users can adjust after pasting.
+      const noExt = component.filePath.replace(/\.[^./]+$/, '');
+      const importPath = noExt.replace(/^src\//, '@/');
+      const importStmt = component.exportType === 'default'
+        ? `import ${component.name} from '${importPath}';`
+        : `import { ${component.name} } from '${importPath}';`;
+      await vscode.env.clipboard.writeText(importStmt);
+      void vscode.window.showInformationMessage('Copied import statement.');
+    })
+  );
 }
 
 function registerFigmaMcpBridgeCommands(

@@ -1,5 +1,6 @@
 {
   "name": "Figma to VS Code Sender",
+  "id": "figma-to-vscode-sender-nwa",
   "api": "1.0.0",
   "main": "dist/code.js",
   "ui": "dist/ui.html",

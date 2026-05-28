@@ -175,6 +175,10 @@
       .card-sub   { color: var(--muted); font-size: 11px; margin-top: 2px; }
 
       .list { display: flex; flex-direction: column; gap: 6px; }
+      .list[hidden],
+      [hidden] {
+        display: none !important;
+      }
       .empty {
         padding: 16px; text-align: center; color: var(--muted);
         border: 1px dashed var(--border); border-radius: 8px;
@@ -220,6 +224,29 @@
       .section-title {
         font-size: 11px; font-weight: 700; color: #374151;
         text-transform: uppercase; letter-spacing: 0.04em;
+      }
+
+      /* Collapsible section head — used by "Unmatched components".
+         Looks like the static .section-head but is a real button so it
+         takes keyboard focus, and the caret rotates with the open state. */
+      button.section-toggle {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        padding: 4px 0;
+        width: 100%;
+        cursor: pointer;
+        font-family: inherit;
+        color: inherit;
+      }
+      button.section-toggle:hover .section-title { color: #111827; }
+      button.section-toggle .section-caret {
+        color: #9ca3af;
+        transition: transform 0.15s ease;
+        flex: 0 0 10px;
+      }
+      button.section-toggle:not(.collapsed) .section-caret {
+        transform: rotate(90deg);
       }
 
       /* ---- Selection tree ------------------------------------------------ */
@@ -278,6 +305,36 @@
         letter-spacing: 0.03em; flex: 0 0 auto;
       }
       .tree-children.collapsed { display: none; }
+
+      /* ---- Tree row inline actions (eye + star) ---------------------- */
+      /* Both icons live at the right edge of a .tree-row. The star is a
+         pure indicator; the eye is a clickable button that focuses the
+         Figma viewport without changing the selection. */
+      .tree-row .tree-star,
+      .tree-row .tree-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 16px;
+        width: 16px; height: 16px;
+        margin-left: 4px;
+        line-height: 0;
+      }
+      .tree-row .tree-star {
+        color: #16a34a; /* green */
+      }
+      .tree-row .tree-action {
+        border: 0;
+        background: transparent;
+        padding: 0;
+        color: #9ca3af; /* gray */
+        cursor: pointer;
+        border-radius: 4px;
+      }
+      .tree-row .tree-action:hover { color: #374151; background: #f3f4f6; }
+      /* Push the action icons to the right of the row */
+      .tree-row .tree-name { flex: 0 0 auto; }
+      .tree-row .tree-type { margin-right: auto; }
 
       .node-panel {
         min-height: 240px;
@@ -394,6 +451,24 @@
       .rc-value.missing { color: #9ca3af; font-style: italic; }
       .rc-value.missing::before {
         content: "✕ "; font-style: normal; color: #d1d5db;
+      }
+
+      /* ---- Export sticky footer (Review & Export button) ---------------- */
+      /* The Export panel is the scrollable surface; pinning the CTA to the
+         bottom keeps it reachable on long unmatched lists without forcing the
+         user to scroll. Negative margins extend the white background past the
+         panel padding so the button sits flush with the bottom edge. */
+      .export-sticky-footer {
+        position: sticky;
+        bottom: -12px;
+        margin: 4px -12px -12px;
+        padding: 10px 12px;
+        background: var(--surface);
+        border-top: 1px solid var(--border);
+        z-index: 5;
+      }
+      .export-sticky-footer .btn {
+        width: 100%;
       }
 
       /* ---- Page header (Settings, sub-pages) ----------------------------- */
@@ -789,23 +864,34 @@
               </aside>
             </div>
 
-            <div class="section-head">
+            <button
+              id="unmatched-toggle"
+              type="button"
+              class="section-head section-toggle collapsed"
+              aria-expanded="false"
+              aria-controls="unmatched-list">
+              <svg class="section-caret" width="10" height="10" viewBox="0 0 16 16" fill="none">
+                <path d="M5 3l5 5-5 5" stroke="currentColor" stroke-width="1.6"
+                      stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
               <span class="section-title">Unmatched components</span>
               <span id="unmatched-count" class="badge muted">0</span>
-            </div>
-            <div id="unmatched-list" class="list">
+            </button>
+            <div id="unmatched-list" class="list collapsed" hidden>
               <div class="empty">Nothing scanned yet.</div>
             </div>
 
             <div id="export-status" class="status">Pick a frame, then Scan.</div>
 
-            <button id="review-export-btn" class="btn btn-gradient" disabled>
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                <path d="M3 8h9M8.5 4.5L12 8l-3.5 3.5" stroke="currentColor"
-                      stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-              Review &amp; Export
-            </button>
+            <div class="export-sticky-footer">
+              <button id="review-export-btn" class="btn btn-gradient" disabled>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                  <path d="M3 8h9M8.5 4.5L12 8l-3.5 3.5" stroke="currentColor"
+                        stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Review &amp; Export
+              </button>
+            </div>
           </div>
 
           <!-- ===== Export review view: component table ===== -->
@@ -881,8 +967,20 @@
             <div class="stat"><div class="v" id="rs-tokens">0</div><div class="l">Tokens used</div></div>
           </div>
           <div class="card">
-            <div class="card-title">Unmatched components</div>
-            <div id="rs-unmatched-list" class="list"></div>
+            <button
+              id="rs-unmatched-toggle"
+              type="button"
+              class="section-head section-toggle collapsed"
+              aria-expanded="false"
+              aria-controls="rs-unmatched-list">
+              <svg class="section-caret" width="10" height="10" viewBox="0 0 16 16" fill="none">
+                <path d="M5 3l5 5-5 5" stroke="currentColor" stroke-width="1.6"
+                      stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span class="section-title">Unmatched components</span>
+              <span id="rs-unmatched-count" class="badge muted">0</span>
+            </button>
+            <div id="rs-unmatched-list" class="list collapsed" hidden></div>
           </div>
           <div class="card">
             <div class="card-title">Missing tokens</div>

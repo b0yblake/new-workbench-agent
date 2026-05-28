@@ -22,13 +22,22 @@ import {
   AssetRef,
   AssetRefSpec,
   AutofillSuggestion,
+  ComponentContent,
+  ComponentContentText,
   ComponentMapping,
   ComponentRefSpec,
   CompressedSpec,
+  LeanContent,
   DesignTokenRef,
   FEComponentCatalogItem,
   FETokenCatalogItem,
   LayoutSpec,
+  LeanAsset,
+  LeanComponent,
+  LeanLayout,
+  LeanNode,
+  LeanSpec,
+  LeanText,
   MainToUi,
   MappingReport,
   PLUGIN_VERSION,
@@ -54,6 +63,14 @@ const STORAGE_KEY_MAPPINGS = "vscode-bridge:mappings";
 const STORAGE_KEY_COMPONENT_CATALOG = "vscode-bridge:catalog:components";
 const STORAGE_KEY_TOKEN_CATALOG = "vscode-bridge:catalog:tokens";
 const PLUGIN_DATA_MARK = "vscode-mark";
+// Persistent tags written onto Figma nodes when a mapping is confirmed.
+// These survive across file copies / re-renders / new layouts and let
+// Auto-fill restore the mapping at P0 (highest priority) without rerunning
+// the catalog matcher. The figmaComponentKey on the main component is the
+// other half of the stickiness; this tag is the "anything-with-this-id"
+// fallback for non-main nodes (frames, groups, sections used as components).
+const PLUGIN_DATA_MAPPING_ID = "vscode-mapping-id";
+const PLUGIN_DATA_CODE_COMPONENT = "vscode-code-component";
 const UI_SIZE = { width: 700, height: 720 } as const;
 
 // The plugin runs in two contexts:
@@ -152,7 +169,34 @@ function getSelectionState(): {
   };
 }
 
+// Plugin-driven selection state for the "highlight flash" (eye icon).
+//
+// Conceptually we want two independent things:
+//   • User selection — what the designer has clicked on the Figma canvas.
+//     This is the *only* signal that should rebuild the plugin's Selection
+//     tree.
+//   • Tree-row focus — clicking the eye icon in a tree row paints Figma's
+//     purple selection border on the target node so the user can spot it,
+//     but it must NOT propagate back into the tree or the selection card.
+//
+// Figma's plugin API exposes a single global selection (figma.currentPage.
+// selection) and fires selectionchange on every write — including the
+// programmatic writes we use to render the flash. So we suppress those
+// programmatic events explicitly: a flag is raised before the flash, every
+// selectionchange that fires while the flag is up is swallowed, and the
+// flag drops one microtask after the restore.
+let flashing = false;
+let flashTimer: ReturnType<typeof setTimeout> | null = null;
+let flashRealSelection: SceneNode[] = [];
+
 figma.on("selectionchange", () => {
+  if (flashing) {
+    // The flash and its restore write both produce selectionchange events;
+    // both belong to the plugin, not the user, so we drop them on the
+    // floor. The Selection tree stays anchored to the user's real
+    // selection from before the flash began.
+    return;
+  }
   const s = getSelectionState();
   post({ type: "SELECTION_STATE", ...s });
 });
@@ -235,14 +279,44 @@ async function handleUiMessage(msg: UiToMain): Promise<void> {
         if (idx >= 0) list[idx] = stamped;
         else list.push(stamped);
         await saveMappings(list);
+        // Tag the node itself so the mapping is sticky across files and
+        // future layouts that reuse this exact node instance.
+        if (stamped.figmaNodeId) {
+          try {
+            const node = await figma.getNodeByIdAsync(stamped.figmaNodeId);
+            if (node && "setPluginData" in node) {
+              (node as BaseNode).setPluginData(PLUGIN_DATA_MAPPING_ID, stamped.id);
+              (node as BaseNode).setPluginData(
+                PLUGIN_DATA_CODE_COMPONENT,
+                stamped.codeComponent
+              );
+            }
+          } catch {
+            /* node may have been removed; tag was best-effort */
+          }
+        }
         post({ type: "MAPPINGS_UPDATED", mappings: list });
         return;
       }
 
       case "DELETE_MAPPING": {
         const list = await loadMappings();
+        const removed = list.find((m) => m.id === msg.id);
         const next = list.filter((m) => m.id !== msg.id);
         await saveMappings(next);
+        // Clear the sticky tag on the original node so the matcher won't keep
+        // pointing at a mapping that no longer exists.
+        if (removed?.figmaNodeId) {
+          try {
+            const node = await figma.getNodeByIdAsync(removed.figmaNodeId);
+            if (node && "setPluginData" in node) {
+              (node as BaseNode).setPluginData(PLUGIN_DATA_MAPPING_ID, "");
+              (node as BaseNode).setPluginData(PLUGIN_DATA_CODE_COMPONENT, "");
+            }
+          } catch {
+            /* node already gone */
+          }
+        }
         post({ type: "MAPPINGS_UPDATED", mappings: next });
         return;
       }
@@ -292,9 +366,10 @@ async function handleUiMessage(msg: UiToMain): Promise<void> {
         ]);
         post({ type: "PROGRESS", stage: "Building compressed spec…" });
         const spec = await buildCompressedSpec(node, mappings, components, tokens);
+        const lean = buildLeanSpec(spec);
         post({ type: "PROGRESS", stage: "Building nwa export bundle…" });
         const nwa = await buildNwaBundle(node, mappings);
-        post({ type: "SPEC_READY", spec, nwa });
+        post({ type: "SPEC_READY", spec, lean, nwa });
         return;
       }
 
@@ -310,27 +385,65 @@ async function handleUiMessage(msg: UiToMain): Promise<void> {
         const n = await figma.getNodeByIdAsync(msg.nodeId);
         if (n && n.type !== "DOCUMENT" && n.type !== "PAGE") {
           figma.viewport.scrollAndZoomIntoView([n as SceneNode]);
-          if (!msg.preserveSelection) {
+          if (msg.highlight) {
+            // "Highlight" mode (eye icon) — combine the only two non-
+            // destructive feedback signals Figma exposes:
+            //   1. Snap-select the target node so Figma paints its purple
+            //      selection border, then restore the user's real
+            //      selection after ~2s. Plugin-driven selectionchange
+            //      events are swallowed by the listener above so the
+            //      Selection tree stays anchored to whatever the user
+            //      chose on the canvas.
+            //   2. A toast at the bottom of the canvas confirming which
+            //      node we focused on — useful when the node is small or
+            //      offscreen during the zoom animation.
+            const sceneNode = n as SceneNode;
+
+            // Cancel any in-flight restore so overlapping eye clicks share
+            // one continuous flash window rather than fighting each other.
+            if (flashTimer !== null) {
+              clearTimeout(flashTimer);
+              flashTimer = null;
+            }
+
+            // Capture the user's *real* selection only at the start of a
+            // fresh flash. A second eye click during the same window
+            // should still restore the original user selection, not the
+            // previous flash target.
+            if (!flashing) {
+              flashRealSelection = figma.currentPage.selection.slice();
+              flashing = true;
+            }
+
+            figma.currentPage.selection = [sceneNode];
+            figma.notify(`Focused on “${sceneNode.name || "node"}”`, {
+              timeout: 2000,
+            });
+
+            flashTimer = setTimeout(() => {
+              try {
+                const stillValid = flashRealSelection.filter(
+                  (s) => s.parent !== null
+                );
+                // Still inside the flashing window — the restore write
+                // fires one more selectionchange that we want to swallow
+                // before dropping the suppression flag.
+                figma.currentPage.selection = stillValid;
+              } catch {
+                /* page may have changed; ignore */
+              }
+              // Drop the flag on the next tick so Figma's selectionchange
+              // event from the restore has fired and been swallowed.
+              setTimeout(() => {
+                flashing = false;
+                flashRealSelection = [];
+                flashTimer = null;
+              }, 50);
+            }, 2000);
+          } else if (!msg.preserveSelection) {
             figma.currentPage.selection = [n as SceneNode];
           }
         }
-        return;
-      }
-
-      case "CREATE_COMPONENT_FROM_NODE": {
-        const n = await figma.getNodeByIdAsync(msg.nodeId);
-        if (!n || n.type === "DOCUMENT" || n.type === "PAGE") {
-          throw new Error("Cannot create a component from this node.");
-        }
-        const previousSelection = figma.currentPage.selection.slice();
-        const component = figma.createComponentFromNode(n as SceneNode);
-        figma.viewport.scrollAndZoomIntoView([component]);
-        const restored = previousSelection.filter((s) => s.parent !== null);
-        if (restored.length) {
-          figma.currentPage.selection = restored;
-        }
-        figma.notify(`Created component "${component.name}".`);
-        post({ type: "PROGRESS", stage: `Created component "${component.name}". Scan again to refresh the tree.` });
         return;
       }
 
@@ -407,6 +520,7 @@ async function summariseSelection(root: SceneNode): Promise<{
     nodeId: string;
     name: string;
     figmaName: string;
+    displayName: string;
     mainComponentKey?: string;
   }>;
 }> {
@@ -421,12 +535,17 @@ async function summariseSelection(root: SceneNode): Promise<{
   let nodes = 0;
   let instances = 0;
   let textNodes = 0;
+  // Track unmatched instances by their stable component identity
+  // (figmaComponentKey when available, else figmaName), so that a screen with
+  // 30 copies of the same Button only adds one row to the unmatched list.
   const unmatched: Array<{
     nodeId: string;
     name: string;
     figmaName: string;
+    displayName: string;
     mainComponentKey?: string;
   }> = [];
+  const unmatchedSeen = new Set<string>();
 
   // Unique component rows for the Review & Export table.
   const reviewComponents: ReviewComponent[] = [];
@@ -456,23 +575,45 @@ async function summariseSelection(root: SceneNode): Promise<{
       mappingName = figmaName;
       figmaComponentKey = mc?.key;
       figmaComponentName = mc?.name;
+      const sticky = readStickyMappingId(n);
       const m = matchMapping(
-        { figmaName, figmaComponentKey: mc?.key, figmaNodeId: n.id },
+        {
+          figmaName,
+          figmaComponentKey: mc?.key,
+          figmaNodeId: n.id,
+          stickyMappingId: sticky,
+        },
         mappings,
         components
       );
-      matched = !!m;
-      codeComponent = m?.mapping.codeComponent;
-      codeFilePath = m?.mapping.codeFilePath;
-      importType = m?.mapping.importType;
-      importName = m?.mapping.importName;
-      if (!m) {
-        unmatched.push({
-          nodeId: n.id,
-          name: n.name,
-          figmaName,
-          mainComponentKey: mc?.key,
-        });
+      // Only count as "matched" when the match comes from a user-saved
+      // mapping (P0–P4). The matcher's P5 priority returns a *synthetic*
+      // mapping built from the FE component catalog (id starts with
+      // "auto:") — it's a suggestion, not a confirmed mapping, so the tree
+      // star and side-panel info should treat it as unmatched until the
+      // user confirms it via Auto-Fill or the record manager.
+      const savedMatch = isSavedMatch(m);
+      matched = savedMatch;
+      codeComponent = savedMatch ? m!.mapping.codeComponent : undefined;
+      codeFilePath = savedMatch ? m!.mapping.codeFilePath : undefined;
+      importType = savedMatch ? m!.mapping.importType : undefined;
+      importName = savedMatch ? m!.mapping.importName : undefined;
+      if (!savedMatch) {
+        // Dedupe by component identity — the same Figma component class can
+        // appear dozens of times in a screen, but the user only needs to map
+        // it once. Catalog suggestions also land here so the user gets a
+        // chance to confirm them.
+        const dedupeKey = mc?.key ?? figmaName;
+        if (!unmatchedSeen.has(dedupeKey)) {
+          unmatchedSeen.add(dedupeKey);
+          unmatched.push({
+            nodeId: n.id,
+            name: n.name,
+            figmaName,
+            displayName: getDisplayName(mc, n),
+            mainComponentKey: mc?.key,
+          });
+        }
       }
       const key = mc?.key ?? figmaName;
       if (!reviewSeen.has(key)) {
@@ -481,21 +622,28 @@ async function summariseSelection(root: SceneNode): Promise<{
           nodeId: n.id,
           name: figmaName,
           type: "INSTANCE",
-          codeComponent: m ? m.mapping.codeComponent : null,
-          codeFilePath: m ? m.mapping.codeFilePath : null,
+          codeComponent: savedMatch ? m!.mapping.codeComponent : null,
+          codeFilePath: savedMatch ? m!.mapping.codeFilePath : null,
         });
       }
     } else {
+      const sticky = readStickyMappingId(n);
       const m = matchMapping(
-        { figmaName: n.name, figmaNodeId: n.id },
+        {
+          figmaName: n.name,
+          figmaNodeId: n.id,
+          stickyMappingId: sticky,
+        },
         mappings,
         components
       );
-      matched = !!m;
-      codeComponent = m?.mapping.codeComponent;
-      codeFilePath = m?.mapping.codeFilePath;
-      importType = m?.mapping.importType;
-      importName = m?.mapping.importName;
+      // Same saved-vs-synthetic filter as the INSTANCE branch above.
+      const savedMatch = isSavedMatch(m);
+      matched = savedMatch;
+      codeComponent = savedMatch ? m!.mapping.codeComponent : undefined;
+      codeFilePath = savedMatch ? m!.mapping.codeFilePath : undefined;
+      importType = savedMatch ? m!.mapping.importType : undefined;
+      importName = savedMatch ? m!.mapping.importName : undefined;
     }
 
     const treeNode: SelectionTreeNode = {
@@ -532,8 +680,14 @@ async function summariseSelection(root: SceneNode): Promise<{
   };
   if (root.type === "INSTANCE") {
     const mc = await tryGetMain(root as InstanceNode);
+    const sticky = readStickyMappingId(root);
     const m = matchMapping(
-      { figmaName: mc?.name ?? root.name, figmaComponentKey: mc?.key, figmaNodeId: root.id },
+      {
+        figmaName: mc?.name ?? root.name,
+        figmaComponentKey: mc?.key,
+        figmaNodeId: root.id,
+        stickyMappingId: sticky,
+      },
       mappings,
       components
     );
@@ -755,6 +909,31 @@ async function tryGetMain(n: InstanceNode): Promise<ComponentNode | null> {
   }
 }
 
+// Pick the most human-readable label for an INSTANCE node.
+//
+// Figma variants live inside a COMPONENT_SET. The main component's own .name
+// is the variant key (e.g. "Type=Normal, Breakpoint=Desktop"); the parent
+// COMPONENT_SET carries the friendly base name (e.g. "Card header"). The
+// instance node's .name follows the same default, so we walk:
+//   1. mc.parent.name when the main lives inside a COMPONENT_SET
+//   2. else mc.name (non-variant main component)
+//   3. else the layer's own name as a last resort
+// "Variant=Foo" strings still survive in figmaName so the matcher's
+// name-based priorities (P3 / P4) keep working — only the displayed label
+// changes.
+function getDisplayName(mc: ComponentNode | null, n: SceneNode): string {
+  if (mc && mc.parent && mc.parent.type === "COMPONENT_SET" && mc.parent.name) {
+    return mc.parent.name;
+  }
+  if (mc && mc.name && !/=/.test(mc.name)) {
+    return mc.name;
+  }
+  if (n.name && !/=/.test(n.name)) {
+    return n.name;
+  }
+  return mc?.name || n.name || "Component";
+}
+
 // ---------------------------------------------------------------------------
 // Matcher — priorities P1..P5
 // ---------------------------------------------------------------------------
@@ -763,6 +942,9 @@ interface MatchInput {
   figmaName: string;
   figmaNodeId?: string;
   figmaComponentKey?: string;
+  // When set, the node has been previously tagged with a confirmed mapping id.
+  // This takes precedence over every other priority (P0).
+  stickyMappingId?: string;
 }
 
 interface MatchResult {
@@ -771,11 +953,29 @@ interface MatchResult {
   reason: string;
 }
 
+// Distinguishes a confirmed (user-saved) match from a P5 catalog suggestion.
+// P5 builds a synthetic mapping on the fly with id "auto:<componentName>";
+// every saved mapping uses a different id format (manual "m_*", auto-fill
+// "auto_*", project-mappings carry whatever id VS Code generated). The
+// colon vs. underscore split keeps catalog suggestions out of "matched"
+// state until the user explicitly confirms them.
+function isSavedMatch(m: MatchResult | null): m is MatchResult {
+  return !!m && !m.mapping.id.startsWith("auto:");
+}
+
 function matchMapping(
   input: MatchInput,
   mappings: ReadonlyArray<ComponentMapping>,
   components: ReadonlyArray<FEComponentCatalogItem>
 ): MatchResult | null {
+  // P0: sticky tag written onto the node when the user confirmed a mapping
+  if (input.stickyMappingId) {
+    const hit = mappings.find((m) => m.id === input.stickyMappingId);
+    if (hit) {
+      return { mapping: hit, confidence: 1, reason: "sticky-tag" };
+    }
+  }
+
   // P1: exact figmaNodeId
   if (input.figmaNodeId) {
     const hit = mappings.find((m) => m.figmaNodeId === input.figmaNodeId);
@@ -914,8 +1114,14 @@ async function autofillSuggestions(
     const key = mc?.key ?? figmaName;
     if (seen.has(key)) return;
 
+    const sticky = readStickyMappingId(n);
     const exact = matchMapping(
-      { figmaName, figmaComponentKey: mc?.key, figmaNodeId: n.id },
+      {
+        figmaName,
+        figmaComponentKey: mc?.key,
+        figmaNodeId: n.id,
+        stickyMappingId: sticky,
+      },
       mappings,
       components
     );
@@ -1111,8 +1317,14 @@ async function buildNode(
     ctx.totalInstances++;
     const mc = await tryGetMain(n as InstanceNode);
     const figmaName = mc?.name ?? n.name;
+    const sticky = readStickyMappingId(n);
     const match = matchMapping(
-      { figmaName, figmaComponentKey: mc?.key, figmaNodeId: n.id },
+      {
+        figmaName,
+        figmaComponentKey: mc?.key,
+        figmaNodeId: n.id,
+        stickyMappingId: sticky,
+      },
       ctx.mappings,
       ctx.components
     );
@@ -1141,11 +1353,11 @@ async function buildNode(
         });
       }
 
-      const props = await extractInstanceProps(
-        n as InstanceNode,
-        match.mapping,
-        ctx
-      );
+      // Design payload (visible texts + nested matched components) rather
+      // than typed props — the AI consumer infers real prop names from the
+      // source file. Auto-generated camelCase prop keys from text values
+      // produced noise like `toApr92026441PM` and were dropped.
+      const content = await collectContent(n, ctx);
 
       const spec: ComponentRefSpec = {
         type: "component_ref",
@@ -1155,12 +1367,13 @@ async function buildNode(
         codeFilePath: match.mapping.codeFilePath,
         importType: match.mapping.importType,
         importName: match.mapping.importName,
-        props,
+        ...(content ? { content } : {}),
         pruned: true,
         confidence: match.confidence,
       };
       // Don't descend into children — they are implementation details of the
-      // matched code component.
+      // matched code component. (Content collection above already pulled out
+      // the texts + nested matched components we actually need.)
       return spec;
     } else {
       ctx.unmatched++;
@@ -1170,6 +1383,65 @@ async function buildNode(
         nodeId: n.id,
       });
       // Fall through and treat as a layout node so the design intent isn't lost.
+    }
+  }
+
+  // FRAME / GROUP / SECTION / COMPONENT → user-mapped to a code component?
+  // The Table -> IposTable case: the user maps a regular FRAME (not an
+  // INSTANCE) to a component file via the tree-node panel. We collapse the
+  // subtree the same way we do for INSTANCEs, then infer props from the
+  // direct children (text → string props, nested matched components →
+  // nested component_refs). The selected root is excluded so the user can
+  // still see the body of what they exported.
+  if (!isRoot && isMappableContainer(n.type)) {
+    const sticky = readStickyMappingId(n);
+    const match = matchMapping(
+      {
+        figmaName: n.name,
+        figmaNodeId: n.id,
+        stickyMappingId: sticky,
+      },
+      ctx.mappings,
+      ctx.components
+    );
+    if (match) {
+      ctx.matched++;
+      ctx.totalInstances++;
+      ctx.confidenceSum += match.confidence;
+      ctx.matchedDetails.push({
+        figmaName: n.name,
+        codeComponent: match.mapping.codeComponent,
+        confidence: match.confidence,
+      });
+      const key = match.mapping.codeComponent + "@" + match.mapping.codeFilePath;
+      const existing = ctx.componentsUsed.get(key);
+      if (existing) existing.occurrences++;
+      else {
+        ctx.componentsUsed.set(key, {
+          figmaName: n.name,
+          codeComponent: match.mapping.codeComponent,
+          codeFilePath: match.mapping.codeFilePath,
+          importType: match.mapping.importType,
+          importName: match.mapping.importName,
+          confidence: match.confidence,
+          occurrences: 1,
+        });
+      }
+      // Same content-vs-props distinction as the INSTANCE branch above.
+      const content = await collectContent(n, ctx);
+      const spec: ComponentRefSpec = {
+        type: "component_ref",
+        figmaName: n.name,
+        figmaNodeId: n.id,
+        codeComponent: match.mapping.codeComponent,
+        codeFilePath: match.mapping.codeFilePath,
+        importType: match.mapping.importType,
+        importName: match.mapping.importName,
+        ...(content ? { content } : {}),
+        pruned: true,
+        confidence: match.confidence,
+      };
+      return spec;
     }
   }
 
@@ -1197,6 +1469,114 @@ async function buildNode(
     children: children.length ? children : undefined,
   };
   return spec;
+}
+
+function isMappableContainer(type: string): boolean {
+  return (
+    type === "FRAME" ||
+    type === "GROUP" ||
+    type === "SECTION" ||
+    type === "COMPONENT" ||
+    type === "COMPONENT_SET"
+  );
+}
+
+// Maximum number of text records emitted per matched component. The AI
+// only needs enough samples to infer the row shape — past ~200 entries the
+// payload turns into noise. When truncated, the lean spec flags it so
+// consumers know data was elided.
+const MAX_CONTENT_TEXTS = 200;
+
+// Walks a matched component's subtree and emits the design payload the AI
+// consumer needs to bind to real props:
+//   - texts: every visible TEXT node in document order, keeping the Figma
+//     layer name (the strongest hint for prop mapping)
+//   - components: nested matched components, recursively (so the
+//     "Card has Action button" structure survives)
+// Unmatched layout wrappers (frames, groups) are transparent — they don't
+// generate their own entries, but their descendants bubble up into the
+// matched parent's content. This is the inverse of the previous behaviour
+// which auto-invented prop names like `toApr92026441PM` from text values:
+// here, we don't pretend to know the typed prop signature. The AI reads the
+// real source file (`.vue`/`.tsx`/`.component.ts`) to discover prop names,
+// then matches them to these strings itself.
+async function collectContent(
+  n: SceneNode,
+  ctx: BuildCtx
+): Promise<ComponentContent | undefined> {
+  const texts: ComponentContentText[] = [];
+  const components: SpecNode[] = [];
+  await walkContent(n, texts, components, ctx, 0);
+
+  const truncated = texts.length > MAX_CONTENT_TEXTS;
+  const finalTexts = truncated ? texts.slice(0, MAX_CONTENT_TEXTS) : texts;
+
+  if (finalTexts.length === 0 && components.length === 0) {
+    return undefined;
+  }
+
+  const content: ComponentContent = {};
+  if (finalTexts.length) content.texts = finalTexts;
+  if (components.length) content.components = components;
+  if (truncated) content.truncated = true;
+  return content;
+}
+
+async function walkContent(
+  n: SceneNode,
+  texts: ComponentContentText[],
+  components: SpecNode[],
+  ctx: BuildCtx,
+  depth: number
+): Promise<void> {
+  if (depth > 8) return;
+  if (!("children" in n)) return;
+
+  for (const child of (n as ChildrenMixin).children as SceneNode[]) {
+    if ("visible" in child && child.visible === false) continue;
+
+    if (child.type === "TEXT") {
+      const value = typeof (child as TextNode).characters === "string"
+        ? (child as TextNode).characters.trim()
+        : "";
+      if (value) {
+        texts.push({ name: child.name, value });
+      }
+      continue;
+    }
+
+    // Matched child (INSTANCE or any container with a mapping) → emit as a
+    // nested SpecNode by going back through buildNode, so the same stats /
+    // sticky-tag path applies.
+    let figmaName = child.name;
+    let figmaComponentKey: string | undefined;
+    if (child.type === "INSTANCE") {
+      const mc = await tryGetMain(child as InstanceNode);
+      figmaName = mc?.name ?? child.name;
+      figmaComponentKey = mc?.key;
+    }
+    const childSticky = readStickyMappingId(child);
+    const childMatch = matchMapping(
+      {
+        figmaName,
+        figmaComponentKey,
+        figmaNodeId: child.id,
+        stickyMappingId: childSticky,
+      },
+      ctx.mappings,
+      ctx.components
+    );
+    if (childMatch) {
+      components.push(await buildNode(child, ctx, false));
+      continue;
+    }
+
+    // Unmatched wrapper — walk through transparently so its useful
+    // descendants surface on the parent matched component.
+    if ("children" in child) {
+      await walkContent(child, texts, components, ctx, depth + 1);
+    }
+  }
 }
 
 function extractLayout(n: SceneNode): Record<string, unknown> | undefined {
@@ -1488,71 +1868,6 @@ async function loadLocalVariables(): Promise<Map<string, Variable>> {
 }
 
 // ---------------------------------------------------------------------------
-// Instance props extraction
-// ---------------------------------------------------------------------------
-
-async function extractInstanceProps(
-  n: InstanceNode,
-  mapping: ComponentMapping,
-  ctx: BuildCtx
-): Promise<Record<string, unknown>> {
-  const props: Record<string, unknown> = { ...(mapping.defaultProps ?? {}) };
-
-  // Variant + component properties as raw bag
-  let raw: Record<string, unknown> = {};
-  try {
-    raw = { ...((n.componentProperties as unknown) as Record<string, unknown>) };
-  } catch { /* ignore */ }
-  try {
-    const variantProps = (n as unknown as { variantProperties?: unknown })
-      .variantProperties;
-    if (variantProps && typeof variantProps === "object") {
-      raw = { ...raw, ...(variantProps as Record<string, unknown>) };
-    }
-  } catch { /* ignore */ }
-
-  // Property values from componentProperties have shape { value, type, ... }.
-  for (const [k, v] of Object.entries(raw)) {
-    const codeKey = mapping.propMapping?.[k] ?? camelCase(k);
-    const flat = (v as { value?: unknown })?.value !== undefined
-      ? (v as { value: unknown }).value
-      : v;
-    props[codeKey] = flat;
-  }
-
-  // Merge first text child as `children` when requested.
-  if (mapping.mergeChildProps) {
-    const firstText = findFirstText(n);
-    if (firstText && !("children" in props)) {
-      props.children = firstText;
-    }
-  }
-
-  // Avoid noise from unused tokens — but record usage for the report.
-  void ctx; // ctx kept for future prop→token resolution
-  return props;
-}
-
-function findFirstText(n: SceneNode): string | null {
-  if (n.type === "TEXT" && typeof n.characters === "string") return n.characters;
-  if ("children" in n) {
-    for (const c of (n as ChildrenMixin).children as SceneNode[]) {
-      const r = findFirstText(c);
-      if (r) return r;
-    }
-  }
-  return null;
-}
-
-function camelCase(s: string): string {
-  return s
-    .replace(/^[^a-zA-Z]+/, "")
-    .replace(/[#].*$/, "") // strip Figma's "label#1:2" suffix
-    .replace(/[^a-zA-Z0-9]+(\w)/g, (_, c) => c.toUpperCase())
-    .replace(/^[A-Z]/, (c) => c.toLowerCase());
-}
-
-// ---------------------------------------------------------------------------
 // Asset marking + export
 // ---------------------------------------------------------------------------
 
@@ -1567,6 +1882,16 @@ function getMark(n: SceneNode): AssetMark {
     return null;
   } catch {
     return null;
+  }
+}
+
+function readStickyMappingId(n: SceneNode): string | undefined {
+  try {
+    if (!("getPluginData" in n)) return undefined;
+    const id = (n as BaseNode).getPluginData(PLUGIN_DATA_MAPPING_ID);
+    return id && id.length > 0 ? id : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -1639,4 +1964,235 @@ function uint8ToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode.apply(null, Array.from(slice));
   }
   return btoa(binary);
+}
+
+// ---------------------------------------------------------------------------
+// Lean spec — strips Figma internals so the consumer sees codeComponent +
+// codeFilePath + props, exactly the shape an AI agent needs to assemble the
+// page from existing source components.
+// ---------------------------------------------------------------------------
+
+export function buildLeanSpec(spec: CompressedSpec): LeanSpec {
+  const r = spec.mappingReport;
+  return {
+    version: spec.version,
+    createdAt: spec.createdAt,
+    figma: {
+      fileName: spec.figma.fileName,
+      pageName: spec.figma.pageName,
+      selectedNodeName: spec.figma.selectedNodeName,
+    },
+    screen: {
+      name: spec.screen.name,
+      width: spec.screen.width,
+      height: spec.screen.height,
+      children: spec.screen.children
+        .map(toLeanNode)
+        .filter((n): n is LeanNode => n !== null),
+    },
+    componentsUsed: spec.componentsUsed.map((c) => ({
+      codeComponent: c.codeComponent,
+      codeFilePath: c.codeFilePath,
+      importType: c.importType,
+      ...(c.importName ? { importName: c.importName } : {}),
+      occurrences: c.occurrences,
+    })),
+    tokens: spec.tokens.map((t) => ({
+      name: t.figmaTokenName,
+      type: t.type,
+      ...(t.codeTokenName ? { codeTokenName: t.codeTokenName } : {}),
+      ...(t.codeTokenPath ? { codeTokenPath: t.codeTokenPath } : {}),
+      usageCount: t.usageCount,
+    })),
+    assets: spec.assets.map((a) => ({
+      type: a.type,
+      name: a.name,
+      path: a.path,
+      format: a.format,
+    })),
+    stats: {
+      totalInstances: r.totalInstances,
+      matched: r.matched,
+      unmatched: r.unmatched,
+      confidence: r.confidence,
+      tokenCoverage: r.tokenCoverage,
+    },
+  };
+}
+
+function toLeanNode(node: SpecNode): LeanNode | null {
+  switch (node.type) {
+    case "component_ref": {
+      const out: LeanComponent = {
+        codeComponent: node.codeComponent,
+        codeFilePath: node.codeFilePath,
+      };
+      // importType / importName only matter when they differ from the safe
+      // default ("named" + same name). Hide them when redundant.
+      if (node.importType === "default") {
+        out.importType = "default";
+        if (node.importName && node.importName !== node.codeComponent) {
+          out.importName = node.importName;
+        }
+      }
+      if (node.content) {
+        const leanContent = leanifyContent(node.content);
+        if (leanContent) {
+          out.content = leanContent;
+        }
+      }
+      // ComponentRefSpec only has `children` when an upstream mapping kept
+      // them; the default flow prunes them. Pass them through when present
+      // so the structural intent isn't lost.
+      if (node.children?.length) {
+        const kids = node.children
+          .map(toLeanNode)
+          .filter((c): c is LeanNode => c !== null);
+        if (kids.length) {
+          out.children = kids;
+        }
+      }
+      return out;
+    }
+    case "layout_node": {
+      const kids = (node.children ?? [])
+        .map(toLeanNode)
+        .filter((c): c is LeanNode => c !== null);
+      // Drop pure wrapper frames that produced no useful subtree.
+      if (kids.length === 0 && !node.layout && !node.styles) {
+        return null;
+      }
+      const out: LeanLayout = {
+        layout: describeLayout(node),
+      };
+      if (node.styles && Object.keys(node.styles).length > 0) {
+        const cleanedStyles = cleanStyles(node.styles);
+        if (Object.keys(cleanedStyles).length > 0) {
+          out.styles = cleanedStyles;
+        }
+      }
+      if (kids.length) {
+        out.children = kids;
+      }
+      return out;
+    }
+    case "text_node": {
+      const out: LeanText = { text: node.text };
+      const tokenRef = node.typography?.tokenRef;
+      if (tokenRef) {
+        out.typography = tokenRef;
+      }
+      return out;
+    }
+    case "asset_ref": {
+      const out: LeanAsset = {
+        asset: node.assetType,
+        path: node.path,
+        name: node.name,
+      };
+      return out;
+    }
+  }
+}
+
+// Render a layout_node's auto-layout intent as a short string the consumer can
+// scan visually (e.g. "row gap:8 pad:16,24,16,24"). Falls back to "container"
+// when the node has no auto-layout configuration.
+function describeLayout(node: LayoutSpec): string {
+  const layout = node.layout as
+    | {
+        display?: string;
+        direction?: string;
+        gap?: number;
+        padding?: { top?: number; right?: number; bottom?: number; left?: number };
+        justify?: string;
+        align?: string;
+      }
+    | undefined;
+  if (!layout || !layout.direction) {
+    return node.name || "container";
+  }
+  const parts: string[] = [layout.direction === "row" ? "row" : "column"];
+  if (typeof layout.gap === "number" && layout.gap !== 0) {
+    parts.push(`gap:${layout.gap}`);
+  }
+  if (layout.padding) {
+    const { top = 0, right = 0, bottom = 0, left = 0 } = layout.padding;
+    if (top || right || bottom || left) {
+      parts.push(`pad:${top},${right},${bottom},${left}`);
+    }
+  }
+  if (layout.justify && layout.justify !== "MIN") {
+    parts.push(`justify:${layout.justify.toLowerCase()}`);
+  }
+  if (layout.align && layout.align !== "MIN") {
+    parts.push(`align:${layout.align.toLowerCase()}`);
+  }
+  return parts.join(" ");
+}
+
+// Converts a ComponentContent (spec side, with full SpecNode children) into
+// a LeanContent (lean side, with LeanNode children) by leaning any nested
+// matched components and copying the text records as-is.
+function leanifyContent(content: ComponentContent): LeanContent | undefined {
+  const out: LeanContent = {};
+  if (content.texts && content.texts.length) {
+    out.texts = content.texts;
+  }
+  if (content.components && content.components.length) {
+    const leanComponents = content.components
+      .map(toLeanNode)
+      .filter((c): c is LeanNode => c !== null);
+    if (leanComponents.length) {
+      out.components = leanComponents;
+    }
+  }
+  if (content.truncated) {
+    out.truncated = true;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function cleanStyles(styles: Record<string, unknown>): Record<string, unknown> {
+  // Pull the most useful single value (tokenRef / hex) out of nested raw fills
+  // so the lean spec stays scannable. Anything obscure passes through as-is.
+  const out: Record<string, unknown> = {};
+
+  const fills = styles.fills;
+  if (Array.isArray(fills) && fills.length > 0) {
+    const first = fills[0] as { tokenRef?: string; hex?: string };
+    if (first?.tokenRef) {
+      out.fill = first.tokenRef;
+    } else if (first?.hex) {
+      out.fill = first.hex;
+    }
+  }
+
+  const strokes = styles.strokes;
+  if (Array.isArray(strokes) && strokes.length > 0) {
+    const first = strokes[0] as { tokenRef?: string; hex?: string };
+    if (first?.tokenRef) {
+      out.stroke = first.tokenRef;
+    } else if (first?.hex) {
+      out.stroke = first.hex;
+    }
+  }
+
+  if (typeof styles.cornerRadius === "number") {
+    out.radius = styles.cornerRadius;
+  } else if (
+    styles.cornerRadius &&
+    typeof styles.cornerRadius === "object" &&
+    (styles.cornerRadius as { tokenRef?: string }).tokenRef
+  ) {
+    out.radius = (styles.cornerRadius as { tokenRef: string }).tokenRef;
+  }
+
+  if (Array.isArray(styles.effects) && styles.effects.length > 0) {
+    out.shadow = "yes";
+  }
+  if (typeof styles.opacity === "number") {
+    out.opacity = styles.opacity;
+  }
+  return out;
 }

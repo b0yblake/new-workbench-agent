@@ -14,6 +14,7 @@ import {
   DesignTokenRef,
   FEComponentCatalogItem,
   FETokenCatalogItem,
+  LeanSpec,
   MainToUi,
   PLUGIN_NAME,
   PLUGIN_VERSION,
@@ -59,16 +60,23 @@ function el<K extends keyof HTMLElementTagNameMap>(
 interface AppState {
   selection: { id: string; name: string; type: string } | null;
   mappings: ComponentMapping[];
+  // Project-level mappings sent by VS Code from `.project/figma-bridge/
+  // component-mappings.json`. The Figma plugin keeps a local cache in
+  // figma.clientStorage; this list is the project source of truth that
+  // survives across users, machines, and Figma file copies.
+  projectMappings: ComponentMapping[];
   catalogs: {
     components: FEComponentCatalogItem[];
     tokens: FETokenCatalogItem[];
   };
   lastSpec: CompressedSpec | null;
+  lastLean: LeanSpec | null;
   lastNwa: NwaBundleInfo | null;
   lastUnmatched: Array<{
     nodeId: string;
     name: string;
     figmaName: string;
+    displayName?: string;
   }>;
   ws: {
     status: "offline" | "connecting" | "open" | "handshaken";
@@ -80,8 +88,10 @@ interface AppState {
 const state: AppState = {
   selection: null,
   mappings: [],
+  projectMappings: [],
   catalogs: { components: [], tokens: [] },
   lastSpec: null,
+  lastLean: null,
   lastNwa: null,
   lastUnmatched: [],
   ws: { status: "offline" },
@@ -339,15 +349,42 @@ function handleWsIn(msg: WsIn): void {
       state.ws.lastSyncAt = new Date().toISOString();
       setConnUi();
       renderHandshake();
+      // Adopt any project-level mappings the bridge attached to the handshake.
+      // These survive across files / users; local clientStorage stays as a
+      // warm cache so the plugin still works while offline.
+      if (Array.isArray(msg.projectMappings) && msg.projectMappings.length > 0) {
+        state.projectMappings = msg.projectMappings;
+        mergeProjectMappingsIntoLocal(msg.projectMappings);
+      }
+      const projectMappingsNote = msg.projectMappingsCount
+        ? ` · ${msg.projectMappingsCount} project mapping${msg.projectMappingsCount === 1 ? "" : "s"} restored`
+        : "";
       setConnStatus(
         `Handshake OK · project: ${msg.projectName}` +
-          (msg.framework ? ` · framework: ${msg.framework}` : ""),
+          (msg.framework ? ` · framework: ${msg.framework}` : "") +
+          projectMappingsNote,
         "ok"
       );
       // Auto-pull catalogs if VS Code advertises them.
       if (msg.componentCatalogAvailable || msg.tokenCatalogAvailable) {
         wsSend({ type: "REQUEST_CATALOG", requestId: `auto_${Date.now()}` });
       }
+      // Always request the freshest project mappings as well, in case the
+      // hello did not embed them (e.g. older VS Code extension).
+      if (!msg.projectMappings) {
+        wsSend({ type: "REQUEST_PROJECT_MAPPINGS", requestId: `pm_${Date.now()}` });
+      }
+      return;
+
+    case "PROJECT_MAPPINGS":
+      state.projectMappings = msg.mappings ?? [];
+      mergeProjectMappingsIntoLocal(state.projectMappings);
+      renderRecords();
+      renderTreeNodePanel(activeTreeNode);
+      setConnStatus(
+        `Project mappings synced (${state.projectMappings.length}).`,
+        "ok"
+      );
       return;
 
     case "COMPONENT_CATALOG":
@@ -400,6 +437,47 @@ const treeNodePanelEl = $<HTMLDivElement>("tree-node-panel");
 const treeCountEl = $<HTMLSpanElement>("tree-count");
 const unmatchedListEl = $<HTMLDivElement>("unmatched-list");
 const unmatchedCountEl = $<HTMLSpanElement>("unmatched-count");
+const unmatchedToggleEl = $<HTMLButtonElement>("unmatched-toggle");
+const reportUnmatchedListEl = $<HTMLDivElement>("rs-unmatched-list");
+const reportUnmatchedCountEl = $<HTMLSpanElement>("rs-unmatched-count");
+const reportUnmatchedToggleEl = $<HTMLButtonElement>("rs-unmatched-toggle");
+
+// Shared collapsed section behavior. Counts stay visible in the header so
+// users can see whether there is anything to map before opening the list.
+function setCollapsibleSectionOpen(
+  toggleEl: HTMLButtonElement,
+  contentEl: HTMLElement,
+  open: boolean
+): void {
+  if (open) {
+    toggleEl.classList.remove("collapsed");
+    toggleEl.setAttribute("aria-expanded", "true");
+    contentEl.classList.remove("collapsed");
+    contentEl.hidden = false;
+  } else {
+    toggleEl.classList.add("collapsed");
+    toggleEl.setAttribute("aria-expanded", "false");
+    contentEl.classList.add("collapsed");
+    contentEl.hidden = true;
+  }
+}
+
+function setUnmatchedOpen(open: boolean): void {
+  setCollapsibleSectionOpen(unmatchedToggleEl, unmatchedListEl, open);
+}
+
+function setReportUnmatchedOpen(open: boolean): void {
+  setCollapsibleSectionOpen(reportUnmatchedToggleEl, reportUnmatchedListEl, open);
+}
+
+unmatchedToggleEl.addEventListener("click", () => {
+  const isOpen = !unmatchedToggleEl.classList.contains("collapsed");
+  setUnmatchedOpen(!isOpen);
+});
+reportUnmatchedToggleEl.addEventListener("click", () => {
+  const isOpen = !reportUnmatchedToggleEl.classList.contains("collapsed");
+  setReportUnmatchedOpen(!isOpen);
+});
 const reviewRowsEl = $<HTMLDivElement>("review-rows");
 const exportCountEl = $<HTMLSpanElement>("export-count");
 
@@ -525,28 +603,35 @@ async function downloadNwaAsZip(
 }
 
 function getLastVsCodePayload(): VsCodeDesignSpecPayload | null {
-  if (!state.lastNwa || !state.lastSpec) {
+  if (!state.lastNwa || !state.lastSpec || !state.lastLean) {
     return null;
   }
 
-  return { ...state.lastSpec, nwa: state.lastNwa };
+  return {
+    ...state.lastSpec,
+    nwa: state.lastNwa,
+    lean: state.lastLean,
+    componentMappings: state.mappings,
+  };
 }
 
+// Downloads the lean (path-based) spec — codeComponent / codeFilePath / props
+// only, no Figma node ids or raw shape data. This is the artifact the AI
+// agent consumes. The original verbose CompressedSpec is still sent over the
+// WebSocket for tools that need it.
 function downloadVsCodePayloadAsJson(
   setStatus: (t: string, k?: "info" | "ok" | "warn" | "err") => void
 ): void {
   try {
-    const payload = getLastVsCodePayload();
-    if (!payload) {
+    if (!state.lastLean || !state.lastNwa) {
       setStatus("Build the spec first.", "warn");
       return;
     }
-
-    const json = JSON.stringify(payload, null, 2);
+    const json = JSON.stringify(state.lastLean, null, 2);
     const blob = new Blob([json], { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    const filename = `${payload.nwa.rootSlug}.json`;
+    const filename = `${state.lastNwa.rootSlug}.json`;
     a.href = url;
     a.download = filename;
     document.body.appendChild(a);
@@ -554,8 +639,11 @@ function downloadVsCodePayloadAsJson(
     document.body.removeChild(a);
     window.setTimeout(() => URL.revokeObjectURL(url), 1500);
 
+    const sizeNote = state.lastSpec
+      ? ` (${formatBytes(blob.size)}, ${calcShrink(state.lastSpec, state.lastLean)}% smaller than raw)`
+      : ` (${formatBytes(blob.size)})`;
     setStatus(
-      `Downloaded ${filename} (${formatBytes(blob.size)}) with the same payload sent to VS Code.`,
+      `Downloaded ${filename}${sizeNote}. Path-based compressed spec ready for the AI agent.`,
       "ok"
     );
   } catch (err) {
@@ -563,6 +651,17 @@ function downloadVsCodePayloadAsJson(
       `Failed to build JSON: ${err instanceof Error ? err.message : String(err)}`,
       "err"
     );
+  }
+}
+
+function calcShrink(raw: CompressedSpec, lean: LeanSpec): number {
+  try {
+    const rawSize = JSON.stringify(raw).length;
+    const leanSize = JSON.stringify(lean).length;
+    if (rawSize <= 0) return 0;
+    return Math.max(0, Math.round((1 - leanSize / rawSize) * 100));
+  } catch {
+    return 0;
   }
 }
 
@@ -656,6 +755,39 @@ function renderSelectionTree(tree: SelectionTreeNode | null): void {
       class: `tree-caret${hasKids ? "" : " leaf"}`,
     }, hasKids ? "▾" : "");
 
+    // Eye icon: zoom into the Figma node and flash its purple selection
+    // border, then restore the user's previous selection so they keep
+    // their working context. `highlight: true` triggers the snap-select-
+    // and-restore dance in code.ts.
+    const eyeBtn = el("button", {
+      class: "tree-action tree-eye",
+      title: "Focus on this node in Figma (selection restores after a moment)",
+      onclick: (e: MouseEvent) => {
+        e.stopPropagation();
+        send({
+          type: "ZOOM_TO_NODE",
+          nodeId: node.id,
+          preserveSelection: true,
+          highlight: true,
+        });
+      },
+    });
+    eyeBtn.appendChild(eyeIconSvg());
+
+    // Green star: visible only when this node is already mapped to a code
+    // component. Pure indicator — no click handler.
+    const starEl = node.matched
+      ? el("span", {
+          class: "tree-star",
+          title: node.codeComponent
+            ? `Mapped to ${node.codeComponent}`
+            : "Mapped",
+        })
+      : null;
+    if (starEl) {
+      starEl.appendChild(starIconSvg());
+    }
+
     const row = el("div", {
       class: `tree-row${activeTreeNode?.id === node.id ? " active" : ""}`,
       style: `padding-left:${depth * 12}px`,
@@ -666,7 +798,9 @@ function renderSelectionTree(tree: SelectionTreeNode | null): void {
       caret,
       el("span", { class: dotClass }),
       el("span", { class: "tree-name" }, node.name),
-      el("span", { class: "tree-type" }, node.type)
+      el("span", { class: "tree-type" }, node.type),
+      ...(starEl ? [starEl] : []),
+      eyeBtn
     );
 
     const kidsWrap = el("div", { class: "tree-children" });
@@ -867,7 +1001,7 @@ function renderTreeNodePanel(node: SelectionTreeNode | null): void {
   if (!node) {
     treeNodePanelEl.append(
       el("div", { class: "node-panel-empty" },
-        "Select a node from the tree to create a component or mapping.")
+        "Select a node from the tree to map it to a code component.")
     );
     return;
   }
@@ -875,25 +1009,36 @@ function renderTreeNodePanel(node: SelectionTreeNode | null): void {
   const mapping = findMappingForTreeNode(node);
   const options = codeOptionsForNode(node);
   const mappedOption = mapping ? optionFromMapping(mapping) : null;
-  const select = el("select") as HTMLSelectElement;
-  select.append(el("option", { value: "" }, "Select a code component"));
   const optionMap = new Map<string, CodeComponentOption>();
   for (const option of options) {
     optionMap.set(option.key, option);
-    select.append(
-      el("option", { value: option.key },
-        `${option.componentName}${option.filePath ? ` - ${option.filePath}` : ""}`)
-    );
   }
   if (mappedOption && !optionMap.has(mappedOption.key)) {
     optionMap.set(mappedOption.key, mappedOption);
-    select.append(
-      el("option", { value: mappedOption.key },
-        `${mappedOption.componentName}${mappedOption.filePath ? ` - ${mappedOption.filePath}` : ""}`)
-    );
   }
-  select.value = mappedOption?.key ?? "";
-  select.disabled = options.length === 0 && !mappedOption;
+
+  // Searchable combobox over the same option set as the old <select> — wraps
+  // an input + a filtered dropdown that matches the Figma Name autocomplete
+  // pattern used in the record modal.
+  let selectedKey: string = mappedOption?.key ?? "";
+  const combo = el("div", { class: "combo" }) as HTMLDivElement;
+  const search = el("input", {
+    type: "text",
+    placeholder:
+      optionMap.size > 0
+        ? `Search ${optionMap.size} component${optionMap.size === 1 ? "" : "s"} by name or path…`
+        : "No code components available yet",
+    autocomplete: "off",
+    spellcheck: "false",
+  }) as HTMLInputElement;
+  if (optionMap.size === 0) {
+    search.disabled = true;
+  }
+  if (mappedOption) {
+    search.value = mappedOption.componentName;
+  }
+  const dropdown = el("div", { class: "combo-dropdown", hidden: true }) as HTMLDivElement;
+  combo.append(search, dropdown);
 
   const codeComponentValue = el("div", {
     class: `node-panel-value${mapping?.codeComponent ? "" : " missing"}`,
@@ -907,36 +1052,129 @@ function renderTreeNodePanel(node: SelectionTreeNode | null): void {
 
   const saveBtn = el("button", {
     class: "btn btn-gradient full",
-    disabled: !select.value,
+    disabled: !selectedKey,
     onclick: () => {
-      const option = optionMap.get(select.value);
+      const option = optionMap.get(selectedKey);
       if (option) saveTreeNodeMapping(node, option);
     },
   }, mapping ? "Update Mapping" : "Create Mapping");
 
-  select.addEventListener("change", () => {
-    const option = optionMap.get(select.value);
+  const allOptions = Array.from(optionMap.values());
+  let activeIdx = -1;
+
+  function applyOption(option: CodeComponentOption | undefined): void {
+    selectedKey = option?.key ?? "";
     saveBtn.disabled = !option;
     codeComponentValue.textContent = option?.componentName ?? "Not specified";
     codeComponentValue.classList.toggle("missing", !option);
     codePathValue.textContent = option?.filePath || "Not specified";
     codePathValue.classList.toggle("missing", !option?.filePath);
-  });
+  }
 
-  const createComponentDisabled =
-    node.type === "COMPONENT" || node.type === "COMPONENT_SET" || node.type === "INSTANCE";
-  const createComponentBtn = el("button", {
-    class: "btn btn-secondary",
-    disabled: createComponentDisabled,
-    title: createComponentDisabled
-      ? "This node type cannot be converted into a new component."
-      : "Create a Figma component from this node",
-    onclick: () => send({ type: "CREATE_COMPONENT_FROM_NODE", nodeId: node.id }),
-  }, "Create Component");
+  function filterOptions(query: string): CodeComponentOption[] {
+    const q = query.trim().toLowerCase();
+    if (!q) return allOptions.slice(0, 200);
+    return allOptions
+      .filter((o) =>
+        o.componentName.toLowerCase().includes(q) ||
+        (o.filePath || "").toLowerCase().includes(q)
+      )
+      .slice(0, 200);
+  }
+
+  function renderDropdown(): void {
+    dropdown.innerHTML = "";
+    activeIdx = -1;
+    if (allOptions.length === 0) {
+      dropdown.append(
+        el("div", { class: "combo-empty" },
+          "No code components yet. Run a catalog scan from VS Code, or add records manually."
+        )
+      );
+      dropdown.hidden = false;
+      return;
+    }
+    const matches = filterOptions(search.value);
+    if (matches.length === 0) {
+      dropdown.append(
+        el("div", { class: "combo-empty" },
+          `No component matches "${search.value.trim()}".`
+        )
+      );
+      dropdown.hidden = false;
+      return;
+    }
+    for (const option of matches) {
+      const label = option.filePath
+        ? `${option.componentName} — ${option.filePath}`
+        : option.componentName;
+      const opt = el("div", {
+        class: `combo-option${option.key === selectedKey ? " active" : ""}`,
+        title: label,
+        "data-key": option.key,
+      }, label);
+      // mousedown (not click) keeps the input from blurring before the
+      // assignment lands.
+      opt.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        applyOption(option);
+        search.value = option.componentName;
+        hideDropdown();
+      });
+      dropdown.append(opt);
+    }
+    dropdown.hidden = false;
+  }
+
+  function hideDropdown(): void {
+    dropdown.hidden = true;
+    activeIdx = -1;
+  }
+
+  function moveActive(delta: number): void {
+    const opts = Array.from(dropdown.querySelectorAll<HTMLDivElement>(".combo-option"));
+    if (!opts.length) return;
+    opts.forEach((o) => o.classList.remove("active"));
+    activeIdx = (activeIdx + delta + opts.length) % opts.length;
+    const active = opts[activeIdx];
+    active.classList.add("active");
+    active.scrollIntoView({ block: "nearest" });
+  }
+
+  search.addEventListener("focus", renderDropdown);
+  search.addEventListener("input", renderDropdown);
+  search.addEventListener("blur", () => {
+    window.setTimeout(hideDropdown, 120);
+  });
+  search.addEventListener("keydown", (e) => {
+    if (dropdown.hidden) {
+      if (e.key === "ArrowDown" || e.key === "Enter") {
+        renderDropdown();
+        return;
+      }
+    }
+    if (e.key === "ArrowDown") { e.preventDefault(); moveActive(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveActive(-1); }
+    else if (e.key === "Enter") {
+      const opts = dropdown.querySelectorAll<HTMLDivElement>(".combo-option");
+      if (activeIdx >= 0 && opts[activeIdx]) {
+        e.preventDefault();
+        const key = opts[activeIdx].dataset.key ?? "";
+        const option = optionMap.get(key);
+        if (option) {
+          applyOption(option);
+          search.value = option.componentName;
+        }
+        hideDropdown();
+      }
+    } else if (e.key === "Escape") {
+      hideDropdown();
+    }
+  });
 
   const recordBtn = el("button", {
     class: "btn btn-secondary",
-    onclick: () => openTreeNodeRecordModal(node, optionMap.get(select.value)),
+    onclick: () => openTreeNodeRecordModal(node, optionMap.get(selectedKey)),
   }, mapping ? "Edit Record" : "New Record");
 
   treeNodePanelEl.append(
@@ -951,7 +1189,7 @@ function renderTreeNodePanel(node: SelectionTreeNode | null): void {
     ),
     el("div", { class: "node-panel-section" },
       el("div", { class: "node-panel-label" }, "Select Code Component"),
-      select
+      combo
     ),
     el("div", { class: "node-panel-section" },
       el("div", { class: "node-panel-label" }, "Code File Path"),
@@ -966,7 +1204,6 @@ function renderTreeNodePanel(node: SelectionTreeNode | null): void {
       customValue
     ),
     el("div", { class: "node-panel-actions" },
-      createComponentBtn,
       recordBtn,
       saveBtn
     )
@@ -974,11 +1211,17 @@ function renderTreeNodePanel(node: SelectionTreeNode | null): void {
 }
 
 function renderUnmatched(
-  unmatched: Array<{ nodeId: string; name: string; figmaName: string }>
+  unmatched: Array<{
+    nodeId: string;
+    name: string;
+    figmaName: string;
+    displayName?: string;
+  }>
 ): void {
   state.lastUnmatched = unmatched;
   unmatchedListEl.innerHTML = "";
   unmatchedCountEl.textContent = String(unmatched.length);
+  setUnmatchedOpen(false);
   if (!unmatched.length) {
     unmatchedListEl.append(
       el("div", { class: "empty" }, "All instances are matched.")
@@ -986,14 +1229,30 @@ function renderUnmatched(
     return;
   }
   for (const u of unmatched) {
+    // displayName carries the Component Set parent's name when the unmatched
+    // component is a Figma variant, so "Type=Normal, Breakpoint=Desktop"
+    // shows up as "Card header". Fall back to the older slash-formatting
+    // path for older payloads / non-variant components.
+    const cleanDisplay = u.displayName && !/=/.test(u.displayName)
+      ? u.displayName
+      : undefined;
+    const title = cleanDisplay ?? humanizeComponentTitle(u.figmaName || u.name);
+    const subtitle = u.figmaName && u.figmaName !== title ? u.figmaName : undefined;
     unmatchedListEl.append(
       el("div", { class: "card" },
-        el("div", { class: "card-title" }, u.figmaName),
-        el("div", { class: "card-sub" }, `node: ${u.nodeId}`),
+        el("div", { class: "card-title", title: u.figmaName }, title),
+        ...(subtitle ? [el("div", { class: "card-sub" }, subtitle)] : []),
         el("div", { class: "row", style: "margin-top:6px" },
           el("button", {
             class: "btn btn-tiny btn-secondary auto",
-            onclick: () => send({ type: "ZOOM_TO_NODE", nodeId: u.nodeId }),
+            // preserveSelection keeps the user's original frame as the
+            // selection so they can keep mapping inside it; Locate just
+            // zooms to the unmatched node without re-rooting the selection.
+            onclick: () => send({
+              type: "ZOOM_TO_NODE",
+              nodeId: u.nodeId,
+              preserveSelection: true,
+            }),
           }, "Locate"),
           el("button", {
             class: "btn btn-tiny btn-secondary auto",
@@ -1014,6 +1273,22 @@ function renderUnmatched(
       )
     );
   }
+}
+
+// Picks the most readable label out of a Figma component name. Names like
+// "Button/Primary/Large" use the last segment (the most specific variant) as
+// the title and keep the full path as the subtitle.
+function humanizeComponentTitle(raw: string): string {
+  const cleaned = (raw || "").trim();
+  if (!cleaned) return "Component";
+  if (!cleaned.includes("/")) return cleaned;
+  const segments = cleaned.split("/").map((s) => s.trim()).filter(Boolean);
+  if (segments.length === 0) return cleaned;
+  // "Button/Primary/Large" -> "Button · Large" so the consumer sees both the
+  // category and the specific variant without the noisy middle segments.
+  if (segments.length === 1) return segments[0];
+  if (segments.length === 2) return segments.join(" · ");
+  return `${segments[0]} · ${segments[segments.length - 1]}`;
 }
 
 // ---------- View navigation -----------------------------------------------
@@ -1142,6 +1417,9 @@ function renderRecordCard(m: ComponentMapping): HTMLDivElement {
           // eslint-disable-next-line no-alert
           if (confirm(`Delete "${m.codeComponent || m.figmaName}"?`)) {
             send({ type: "DELETE_MAPPING", id: m.id });
+            if (socket?.readyState === WebSocket.OPEN) {
+              wsSend({ type: "DELETE_MAPPING", id: m.id });
+            }
           }
         },
       }, iconSvg("M3 5h10M5.5 5V3.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V5M4.5 5l.5 8a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1L11.5 5", 13))
@@ -1161,6 +1439,46 @@ function iconSvg(d: string, size = 13): SVGElement {
   path.setAttribute("stroke-width", "1.5");
   path.setAttribute("stroke-linecap", "round");
   path.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(path);
+  return svg;
+}
+
+// Eye icon for the "focus only" action in the selection tree — distinct from
+// iconSvg() because it needs two paths (eyelid + pupil) and currentColor on
+// both stroke + fill so it inherits the row's text color cleanly.
+function eyeIconSvg(): SVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("width", "12");
+  svg.setAttribute("height", "12");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("fill", "none");
+  const lid = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  lid.setAttribute("d", "M1.5 8c1.6-3 4-4.5 6.5-4.5S13 5 14.5 8c-1.5 3-4 4.5-6.5 4.5S3 11 1.5 8z");
+  lid.setAttribute("stroke", "currentColor");
+  lid.setAttribute("stroke-width", "1.4");
+  lid.setAttribute("stroke-linecap", "round");
+  lid.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(lid);
+  const pupil = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  pupil.setAttribute("cx", "8");
+  pupil.setAttribute("cy", "8");
+  pupil.setAttribute("r", "1.7");
+  pupil.setAttribute("fill", "currentColor");
+  svg.appendChild(pupil);
+  return svg;
+}
+
+// Filled star to flag a tree node as already mapped. Pure indicator — the
+// color is bound to the .tree-star CSS class (green) rather than baked in,
+// so it can inherit theme-aware variables.
+function starIconSvg(): SVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("width", "12");
+  svg.setAttribute("height", "12");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("fill", "currentColor");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M8 1.6l1.96 3.97 4.38.63-3.17 3.09.75 4.36L8 11.59l-3.92 2.06.75-4.36L1.66 6.2l4.38-.63z");
   svg.appendChild(path);
   return svg;
 }
@@ -1489,18 +1807,19 @@ function renderReport(spec: CompressedSpec): void {
   const r = spec.mappingReport;
   $("rs-matched").textContent = String(r.matched);
   $("rs-unmatched").textContent = String(r.unmatched);
+  reportUnmatchedCountEl.textContent = String(r.unmatchedDetails.length);
   $("rs-confidence").textContent = `${(r.confidence * 100).toFixed(0)}%`;
   $("rs-token").textContent = `${(r.tokenCoverage * 100).toFixed(0)}%`;
   $("rs-assets").textContent = String(spec.assets.length);
   $("rs-tokens").textContent = String(spec.tokens.length);
 
-  const unmatchedList = $<HTMLDivElement>("rs-unmatched-list");
-  unmatchedList.innerHTML = "";
+  reportUnmatchedListEl.innerHTML = "";
+  setReportUnmatchedOpen(false);
   if (!r.unmatchedDetails.length) {
-    unmatchedList.append(el("div", { class: "empty" }, "🎉 All instances are matched."));
+    reportUnmatchedListEl.append(el("div", { class: "empty" }, "All instances are matched."));
   } else {
     for (const u of r.unmatchedDetails) {
-      unmatchedList.append(
+      reportUnmatchedListEl.append(
         el("div", { class: "card" },
           el("div", { class: "card-title" }, u.figmaName, " ", badge(u.figmaType, "muted")),
           el("div", { class: "card-sub" }, `node: ${u.nodeId}`),
@@ -1547,23 +1866,83 @@ function renderReport(spec: CompressedSpec): void {
 
 // ---------- Autofill ------------------------------------------------------
 
+// Pulls project-level mappings (from .project/figma-bridge in VS Code) into
+// the plugin's local clientStorage so future scans / autofills see them
+// without an extra round-trip. We only insert mappings that are not already
+// represented locally (by id, figmaComponentKey, or figmaName).
+function mergeProjectMappingsIntoLocal(projectMappings: ComponentMapping[]): void {
+  for (const pm of projectMappings) {
+    const exists = state.mappings.some((m) =>
+      m.id === pm.id ||
+      (pm.figmaComponentKey && m.figmaComponentKey === pm.figmaComponentKey) ||
+      m.figmaName === pm.figmaName
+    );
+    if (!exists) {
+      send({ type: "SAVE_MAPPING", mapping: pm });
+    }
+  }
+}
+
+function findInProjectMappings(
+  s: AutofillSuggestion
+): ComponentMapping | undefined {
+  return state.projectMappings.find((pm) =>
+    (pm.figmaComponentKey && pm.figmaComponentKey === s.figmaComponentKey) ||
+    pm.figmaName === s.figmaName
+  );
+}
+
 function handleAutofill(suggestions: AutofillSuggestion[]): void {
   if (!suggestions.length) {
     setExportStatus("Auto-Fill found no INSTANCE nodes in selection.", "warn");
     return;
   }
+
+  // P0 — Restore confirmed project mappings (no confidence threshold; the
+  // user already vouched for them in a previous session).
+  // P-auto — Apply fresh catalog suggestions ≥85% confidence.
+  // Skip — Anything already mapped in local clientStorage.
+  let restored = 0;
   let applied = 0;
+  let skipped = 0;
+
   for (const s of suggestions) {
-    const top = s.candidates[0];
-    if (!top || top.confidence < 0.85) continue;
-    if (state.mappings.some((m) =>
+    const alreadyLocal = state.mappings.some((m) =>
       m.figmaName === s.figmaName ||
       (m.figmaComponentKey && m.figmaComponentKey === s.figmaComponentKey)
-    )) continue;
+    );
+    if (alreadyLocal) {
+      skipped++;
+      continue;
+    }
+
+    const projectConfirmed = findInProjectMappings(s);
+    if (projectConfirmed && projectConfirmed.source === "confirmed") {
+      const stamped: ComponentMapping = {
+        ...projectConfirmed,
+        figmaNodeId: s.figmaNodeId,
+        confidence: 1,
+        source: "confirmed",
+        updatedAt: new Date().toISOString(),
+      };
+      send({ type: "SAVE_MAPPING", mapping: stamped });
+      // Forward to VS Code so the .project mapping picks up the new
+      // figmaNodeId of this layout's instance.
+      if (socket?.readyState === WebSocket.OPEN) {
+        wsSend({ type: "SAVE_MAPPING", mapping: stamped });
+      }
+      restored++;
+      continue;
+    }
+
+    const top = s.candidates[0];
+    if (!top || top.confidence < 0.85) continue;
+
     const next: ComponentMapping = {
       id: `auto_${Date.now()}_${applied}`,
       figmaName: s.figmaName,
       figmaComponentKey: s.figmaComponentKey,
+      figmaNodeId: s.figmaNodeId,
       codeComponent: top.codeComponent,
       codeFilePath: top.codeFilePath,
       importType: "named",
@@ -1573,22 +1952,43 @@ function handleAutofill(suggestions: AutofillSuggestion[]): void {
       updatedAt: new Date().toISOString(),
     };
     send({ type: "SAVE_MAPPING", mapping: next });
+    if (socket?.readyState === WebSocket.OPEN) {
+      wsSend({ type: "SAVE_MAPPING", mapping: next });
+    }
     applied++;
   }
+
+  const unmatched = suggestions.length - restored - applied - skipped;
   const lines: string[] = [
-    `Auto-Fill scanned ${suggestions.length} unique instances.`,
-    `Auto-applied ${applied} high-confidence mappings (≥85%).`,
+    `Auto-Fill scanned ${suggestions.length} unique instance${suggestions.length === 1 ? "" : "s"}.`,
   ];
+  if (restored) {
+    lines.push(`✓ Restored ${restored} confirmed mapping${restored === 1 ? "" : "s"} from project.`);
+  }
+  if (applied) {
+    lines.push(`✓ Auto-applied ${applied} new high-confidence suggestion${applied === 1 ? "" : "s"} (≥85%).`);
+  }
+  if (skipped) {
+    lines.push(`  ${skipped} already mapped locally (skipped).`);
+  }
+  if (unmatched) {
+    lines.push(`  ${unmatched} unmatched — open the unmatched list and map manually.`);
+  }
   for (const s of suggestions.slice(0, 10)) {
     const top = s.candidates[0];
-    if (!top) {
+    const projectHit = findInProjectMappings(s);
+    if (projectHit) {
+      lines.push(`  • ${s.figmaName} → ${projectHit.codeComponent} (project · sticky)`);
+    } else if (!top) {
       lines.push(`  • ${s.figmaName} → (no candidate)`);
     } else {
       lines.push(`  • ${s.figmaName} → ${top.codeComponent} (${Math.round(top.confidence * 100)}% · ${top.reason})`);
     }
   }
-  if (suggestions.length > 10) lines.push(`  … and ${suggestions.length - 10} more`);
-  setExportStatus(lines.join("\n"), applied ? "ok" : "warn");
+  if (suggestions.length > 10) {
+    lines.push(`  … and ${suggestions.length - 10} more`);
+  }
+  setExportStatus(lines.join("\n"), restored + applied > 0 ? "ok" : "warn");
 }
 
 // ---------- Main runtime messages -----------------------------------------
@@ -1642,6 +2042,7 @@ window.addEventListener("message", (event: MessageEvent) => {
 
     case "SPEC_READY": {
       state.lastSpec = msg.spec;
+      state.lastLean = msg.lean;
       state.lastNwa = msg.nwa;
       updateExportButtons();
       renderTokens(msg.spec.tokens);

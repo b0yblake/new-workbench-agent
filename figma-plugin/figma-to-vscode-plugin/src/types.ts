@@ -102,6 +102,24 @@ export type SpecNode =
   | TextSpec
   | AssetRefSpec;
 
+// Text payload found inside a matched component, in document order.
+// The Figma layer name is the strongest signal an AI has for mapping a string
+// to a real prop ("Title" → title, "Request ID" → not a prop but a column
+// header). We keep both name and value so the AI doesn't lose intent.
+export interface ComponentContentText {
+  name: string;
+  value: string;
+}
+
+// Design payload carried by a matched component. Not typed props — the AI
+// reads the real source file (.vue / .tsx / .component.ts) to discover the
+// component's actual prop signatures and binds these strings to them.
+export interface ComponentContent {
+  texts?: ComponentContentText[];
+  components?: SpecNode[];
+  truncated?: boolean;
+}
+
 export interface ComponentRefSpec {
   type: "component_ref";
   figmaName: string;
@@ -110,7 +128,7 @@ export interface ComponentRefSpec {
   codeFilePath: string;
   importType: "default" | "named";
   importName?: string;
-  props: Record<string, unknown>;
+  content?: ComponentContent;
   children?: SpecNode[];
   pruned: true;
   confidence: number;
@@ -193,6 +211,103 @@ export interface CompressedSpec {
   mappingReport: MappingReport;
 }
 
+// ---------- Lean (path-based) export ----------------------------------------
+//
+// The lean spec is what the AI consumer actually needs: which code components
+// to use and where they live. All Figma internals (node ids, raw shape data)
+// are stripped. Matched components collapse to {codeComponent, codeFilePath,
+// props, children?}; unmatched nodes keep just enough structure to convey
+// design intent.
+
+export type LeanNode =
+  | LeanComponent
+  | LeanLayout
+  | LeanText
+  | LeanAsset;
+
+// Lean-side content mirrors ComponentContent but its `components` array
+// holds LeanNodes (already stripped of Figma internals) rather than full
+// SpecNodes.
+export interface LeanContent {
+  texts?: ComponentContentText[];
+  components?: LeanNode[];
+  truncated?: boolean;
+}
+
+export interface LeanComponent {
+  codeComponent: string;
+  codeFilePath: string;
+  importType?: "default" | "named";
+  importName?: string;
+  // `content` carries design payload (visible texts + nested matched
+  // components), NOT typed component props. The AI in the VS Code extension
+  // reads the real source file to discover the component's prop signature,
+  // then binds these strings to the right props itself.
+  content?: LeanContent;
+  children?: LeanNode[];
+}
+
+export interface LeanLayout {
+  layout: string;
+  styles?: Record<string, unknown>;
+  text?: string;
+  children?: LeanNode[];
+}
+
+export interface LeanText {
+  text: string;
+  typography?: string;
+}
+
+export interface LeanAsset {
+  asset: "icon" | "image" | "vector";
+  path: string;
+  name?: string;
+}
+
+export interface LeanSpec {
+  version: string;
+  createdAt: string;
+  figma: {
+    fileName: string;
+    pageName: string;
+    selectedNodeName: string;
+  };
+  screen: {
+    name: string;
+    width: number;
+    height: number;
+    children: LeanNode[];
+  };
+  componentsUsed: Array<{
+    codeComponent: string;
+    codeFilePath: string;
+    importType: "default" | "named";
+    importName?: string;
+    occurrences: number;
+  }>;
+  tokens: Array<{
+    name: string;
+    type: string;
+    codeTokenName?: string;
+    codeTokenPath?: string;
+    usageCount: number;
+  }>;
+  assets: Array<{
+    type: "icon" | "image" | "vector";
+    name: string;
+    path: string;
+    format: "svg" | "png";
+  }>;
+  stats: {
+    totalInstances: number;
+    matched: number;
+    unmatched: number;
+    confidence: number;
+    tokenCoverage: number;
+  };
+}
+
 // ---------- UI ↔ main runtime messages --------------------------------------
 
 export type UiToMain =
@@ -205,8 +320,16 @@ export type UiToMain =
   | { type: "DELETE_MAPPING"; id: string }
   | { type: "SET_CATALOGS"; components?: FEComponentCatalogItem[]; tokens?: FETokenCatalogItem[] }
   | { type: "SET_NODE_MARK"; nodeId: string; mark: AssetMark }
-  | { type: "ZOOM_TO_NODE"; nodeId: string; preserveSelection?: boolean }
-  | { type: "CREATE_COMPONENT_FROM_NODE"; nodeId: string }
+  | {
+      type: "ZOOM_TO_NODE";
+      nodeId: string;
+      preserveSelection?: boolean;
+      // When true, briefly select the node so Figma renders its purple
+      // selection border, then restore the previous selection after a
+      // short delay. Used by the tree-row eye button so the user can spot
+      // the node in the canvas without losing their working selection.
+      highlight?: boolean;
+    }
   | { type: "ZOOM_TO_SELECTION" }
   | { type: "EXPAND_SELECTION" }
   | { type: "GET_FIGMA_COMPONENTS" }
@@ -242,6 +365,10 @@ export type MainToUi =
           nodeId: string;
           name: string;
           figmaName: string;
+          // Human-readable label for the unmatched card: the Component Set
+          // parent name when available, so "Type=Normal, Breakpoint=Desktop"
+          // surfaces as "Card header".
+          displayName: string;
           mainComponentKey?: string;
         }>;
       };
@@ -253,6 +380,7 @@ export type MainToUi =
   | {
       type: "SPEC_READY";
       spec: CompressedSpec;
+      lean: LeanSpec;
       nwa: NwaBundleInfo;
     }
   | { type: "FIGMA_COMPONENTS"; names: string[] }
@@ -281,6 +409,8 @@ export interface NwaBundleInfo {
 
 export type VsCodeDesignSpecPayload = CompressedSpec & {
   nwa: NwaBundleInfo;
+  lean: LeanSpec;
+  componentMappings: ComponentMapping[];
 };
 
 export interface SelectionTreeNode {
@@ -330,8 +460,10 @@ export type WsOut =
       figmaPageName: string;
     }
   | { type: "REQUEST_CATALOG"; requestId: string }
+  | { type: "REQUEST_PROJECT_MAPPINGS"; requestId: string }
   | { type: "SEND_DESIGN_SPEC"; requestId: string; payload: VsCodeDesignSpecPayload }
   | { type: "SAVE_MAPPING"; mapping: ComponentMapping }
+  | { type: "DELETE_MAPPING"; id: string }
   | {
       type: "VALIDATE_MAPPING";
       requestId: string;
@@ -345,6 +477,8 @@ export type WsIn =
       framework?: string;
       componentCatalogAvailable: boolean;
       tokenCatalogAvailable: boolean;
+      projectMappings?: ComponentMapping[];
+      projectMappingsCount?: number;
     }
   | {
       type: "COMPONENT_CATALOG";
@@ -355,6 +489,11 @@ export type WsIn =
       type: "TOKEN_CATALOG";
       requestId?: string;
       tokens: FETokenCatalogItem[];
+    }
+  | {
+      type: "PROJECT_MAPPINGS";
+      requestId?: string;
+      mappings: ComponentMapping[];
     }
   | {
       type: "MAPPING_SUGGESTIONS";

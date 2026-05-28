@@ -4,6 +4,8 @@ import * as vscode from 'vscode';
 
 export const FIGMA_CONTEXT_RELATIVE_DIR = path.join('.project', 'figma', 'context');
 export const FIGMA_CONTEXT_FILENAME = 'latest-figma-context.json';
+export const FIGMA_BRIDGE_RELATIVE_DIR = path.join('.project', 'figma-bridge');
+export const COMPONENT_MAPPINGS_FILENAME = 'component-mappings.json';
 
 export interface StoredFigmaContext {
   source: 'figma-plugin-websocket';
@@ -24,10 +26,46 @@ function resolveFigmaStorageDir(globalStorageFsPath: string): string {
   return path.join(globalStorageFsPath, 'figma');
 }
 
+function resolveFigmaBridgeDir(globalStorageFsPath: string): string {
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (workspaceRoot) {
+    return path.join(workspaceRoot, FIGMA_BRIDGE_RELATIVE_DIR);
+  }
+  return path.join(globalStorageFsPath, 'figma-bridge');
+}
+
 export async function ensureFigmaStorage(context: vscode.ExtensionContext): Promise<string> {
   const figmaStoragePath = resolveFigmaStorageDir(context.globalStorageUri.fsPath);
   await fs.mkdir(figmaStoragePath, { recursive: true });
   return figmaStoragePath;
+}
+
+export async function ensureFigmaBridgeMappingFile(context: vscode.ExtensionContext): Promise<string> {
+  const figmaBridgePath = resolveFigmaBridgeDir(context.globalStorageUri.fsPath);
+  const mappingsPath = path.join(figmaBridgePath, COMPONENT_MAPPINGS_FILENAME);
+
+  await fs.mkdir(figmaBridgePath, { recursive: true });
+
+  try {
+    await fs.access(mappingsPath);
+  } catch (error) {
+    const nodeError = error as NodeJS.ErrnoException;
+    if (nodeError.code !== 'ENOENT') {
+      throw error;
+    }
+
+    await fs.writeFile(
+      mappingsPath,
+      `${JSON.stringify({
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        mappings: []
+      }, null, 2)}\n`,
+      'utf8'
+    );
+  }
+
+  return mappingsPath;
 }
 
 export function getFigmaContextPath(context: vscode.ExtensionContext): string {
@@ -43,6 +81,7 @@ export async function saveLatestFigmaContext(
   payload: unknown
 ): Promise<StoredFigmaContext> {
   await ensureFigmaStorage(context);
+  await ensureFigmaBridgeMappingFile(context);
 
   const storedContext: StoredFigmaContext = {
     source: 'figma-plugin-websocket',

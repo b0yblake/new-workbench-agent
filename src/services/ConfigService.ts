@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { CONFIG_KEYS } from '../utils/constants';
+import { CONFIG_KEYS, DEFAULT_COMPONENT_PATHS } from '../utils/constants';
 import { ToolType } from '../models/AgentConfig';
 import { logger } from '../utils/logger';
 
@@ -111,5 +111,45 @@ export class ConfigService {
     } else {
       await this.addFavoriteAgent(agentId);
     }
+  }
+
+  // ---------- Component scan paths ----------
+
+  getComponentPaths(): string[] {
+    const configured = this.config.get<string[]>(CONFIG_KEYS.COMPONENT_PATHS);
+    if (Array.isArray(configured) && configured.length > 0) {
+      return configured;
+    }
+    return [...DEFAULT_COMPONENT_PATHS];
+  }
+
+  async setComponentPaths(paths: string[]): Promise<void> {
+    const cleaned = Array.from(new Set(paths.map(p => p.trim()).filter(Boolean)));
+    await this.config.update(
+      CONFIG_KEYS.COMPONENT_PATHS,
+      cleaned,
+      vscode.ConfigurationTarget.Workspace
+    );
+    this.refresh();
+  }
+
+  async addComponentPath(newPath: string): Promise<void> {
+    const trimmed = newPath.trim();
+    if (!trimmed) {
+      return;
+    }
+    const paths = this.getComponentPaths();
+    if (paths.includes(trimmed)) {
+      return;
+    }
+    paths.push(trimmed);
+    logger.info('Adding component scan path', { path: trimmed });
+    await this.setComponentPaths(paths);
+  }
+
+  async removeComponentPath(removePath: string): Promise<void> {
+    const paths = this.getComponentPaths().filter(p => p !== removePath);
+    logger.info('Removing component scan path', { path: removePath });
+    await this.setComponentPaths(paths);
   }
 }
