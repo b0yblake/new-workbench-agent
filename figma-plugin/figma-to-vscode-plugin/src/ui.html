@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Figma to VS Code Sender</title>
+    <title>Figma Clarity</title>
     <style>
       :root {
         --bg: #f7f8fb;
@@ -164,6 +164,38 @@
         border: 1px solid #fecaca;
       }
       .btn-tiny { padding: 4px 8px; font-size: 11px; border-radius: 6px; }
+
+      /* ---- Button + info hint (hover to preview structure) ---------------- */
+      .btn-with-hint {
+        display: flex; align-items: center; gap: 6px; position: relative;
+      }
+      .btn-with-hint > .btn { flex: 1; }
+      .info-hint {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 18px; height: 18px; border-radius: 50%;
+        color: var(--muted); cursor: help; flex: 0 0 auto;
+        position: relative;
+      }
+      .info-hint:hover { color: var(--fg); }
+      .info-hint-tip {
+        visibility: hidden; opacity: 0;
+        position: absolute;
+        top: calc(100% + 4px); right: calc(100% + 4px);
+        background: #111827; color: #f3f4f6;
+        padding: 8px 10px; border-radius: 6px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 11px; line-height: 1.45;
+        white-space: pre; max-width: 320px;
+        max-height: 350px; overflow-y: auto; overscroll-behavior: contain;
+        z-index: 50;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+        transition: opacity 0.12s ease, visibility 0.12s ease;
+      }
+      .info-hint:hover .info-hint-tip,
+      .info-hint:focus .info-hint-tip,
+      .info-hint:focus-within .info-hint-tip {
+        visibility: visible; opacity: 1;
+      }
 
       /* ---- Cards / lists --------------------------------------------------- */
       .card {
@@ -765,6 +797,118 @@
         display: inline-flex; align-items: center; gap: 6px;
       }
       .modal-primary:hover { background: var(--accent-purple-strong); }
+
+      /* ---------- Tree row right-click context menu ---------- */
+      .tree-context-menu {
+        position: fixed;
+        z-index: 9999;
+        min-width: 200px;
+        /* Solid opaque surface so the menu is fully readable over any
+           underlying content. --surface-1 wasn't defined (typo) and was
+           collapsing to transparent. */
+        background: var(--surface);
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+        padding: 4px;
+        font-size: 12px;
+        color: var(--fg);
+        user-select: none;
+      }
+      .tree-context-menu[hidden] { display: none; }
+      .tree-context-menu .ctx-header {
+        padding: 6px 10px 4px;
+        color: var(--muted);
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .tree-context-menu .ctx-item {
+        display: flex; align-items: center; gap: 8px;
+        padding: 7px 10px;
+        border-radius: 5px;
+        cursor: pointer;
+        color: var(--fg);
+      }
+      .tree-context-menu .ctx-item:hover:not(.disabled) {
+        background: var(--surface-2);
+      }
+      .tree-context-menu .ctx-item.disabled {
+        color: var(--muted);
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+      .tree-context-menu .ctx-item .ctx-coming {
+        margin-left: auto;
+        font-size: 9.5px;
+        color: var(--muted);
+        background: var(--surface-2);
+        padding: 1px 6px;
+        border-radius: 999px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .tree-context-menu .ctx-divider {
+        height: 1px; background: var(--border); margin: 4px 2px;
+      }
+
+      /* ---------- Mark as Icon modal ---------- */
+      #icon-modal .modal { max-width: 460px; }
+      #icon-modal .icon-modal-node {
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+      }
+      #icon-modal .icon-modal-node-label {
+        font-size: 10.5px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin-bottom: 4px;
+      }
+      #icon-modal .icon-modal-node-name {
+        font-weight: 600;
+        font-size: 14px;
+        color: var(--fg);
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      #icon-modal .icon-modal-info {
+        border: 1px solid var(--accent-purple-2);
+        background: rgba(120, 99, 237, 0.10);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 11.5px;
+        color: var(--fg);
+      }
+      #icon-modal .icon-modal-info .info-title {
+        display: flex; align-items: center; gap: 6px;
+        color: var(--accent-purple-2);
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      #icon-modal .icon-modal-info ul {
+        margin: 0; padding-left: 18px;
+      }
+      #icon-modal .icon-modal-info li {
+        margin: 2px 0;
+        color: var(--muted);
+      }
+      #icon-modal .modal-footer .btn-danger {
+        margin-right: auto;
+        background: transparent;
+        color: #ef4444;
+        border: 1px solid #ef4444;
+        padding: 7px 12px;
+        border-radius: 7px;
+        cursor: pointer;
+        font-family: inherit;
+        font-weight: 500;
+      }
+      #icon-modal .modal-footer .btn-danger:hover {
+        background: rgba(239, 68, 68, 0.10);
+      }
+      #icon-modal .modal-footer .btn-danger[hidden] { display: none; }
     </style>
   </head>
   <body>
@@ -842,7 +986,6 @@
           <!-- ===== Export main view: tree + unmatched ===== -->
           <div id="export-main">
             <div class="row">
-              <button id="scan-btn" class="btn btn-secondary" disabled>Scan selection</button>
               <button id="autofill-btn" class="btn btn-secondary" disabled>Run Auto-Fill</button>
             </div>
 
@@ -853,7 +996,7 @@
                   <span id="tree-count" class="badge muted">0</span>
                 </div>
                 <div id="selection-tree" class="tree">
-                  <div class="empty">Select a frame and press Scan.</div>
+                  <div class="empty">Select a frame in Figma to see its tree.</div>
                 </div>
               </div>
 
@@ -923,8 +1066,59 @@
             </div>
 
             <div class="row" style="margin-top:8px">
-              <button id="review-download-btn" class="btn btn-secondary">Download ZIP</button>
-              <button id="review-download-json-btn" class="btn btn-secondary">Download JSON</button>
+              <div class="btn-with-hint">
+                <button id="review-download-btn" class="btn btn-secondary">Download ZIP</button>
+                <span class="info-hint" tabindex="0" aria-label="ZIP folder structure">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/>
+                    <path d="M8 7v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                    <circle cx="8" cy="5" r="0.9" fill="currentColor"/>
+                  </svg>
+                  <span class="info-hint-tip">{rootSlug}.zip
+├── frame.yaml
+├── manifest.yaml
+├── README.md
+├── components/
+│   └── *.yaml
+├── styles/
+│   ├── fills.yaml
+│   ├── strokes.yaml
+│   ├── effects.yaml
+│   └── typography.yaml
+├── icons/
+│   └── *.svg
+├── images/
+└── previews/
+    └── section.png</span>
+                </span>
+              </div>
+              <div class="btn-with-hint">
+                <button id="review-download-json-btn" class="btn btn-secondary">Download JSON</button>
+                <span class="info-hint" tabindex="0" aria-label="JSON file structure">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/>
+                    <path d="M8 7v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                    <circle cx="8" cy="5" r="0.9" fill="currentColor"/>
+                  </svg>
+                  <span class="info-hint-tip">{rootSlug}.json
+{
+  source: "figma-plugin-websocket",
+  receivedAt: "…",
+  transport: "websocket",
+  server: { host, port },
+  payload: {
+    version, source, createdAt,
+    figma: { fileName, pageName, … },
+    screen: { name, width, height, children[] },
+    componentsUsed[], tokens[], assets[],
+    mappingReport,
+    nwa:  { rootSlug, manifest, files, stats },
+    lean: { … path-based spec … },
+    componentMappings[]
+  }
+}</span>
+                </span>
+              </div>
             </div>
 
             <div id="review-status" class="status">Review the components, then Export.</div>
@@ -1215,6 +1409,128 @@
         </div>
       </div>
     </div>
+    <!-- Right-click context menu for Selection-tree rows. Position is set
+         dynamically in ui.ts. -->
+    <div id="tree-context-menu" class="tree-context-menu" hidden>
+      <div class="ctx-header">Mark this node as…</div>
+      <div class="ctx-item" data-mark-action="icon">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+          <path d="M8 1.5l2 4.5 5 .5-3.8 3.4 1.1 5.1L8 12.4 3.7 15l1.1-5.1L1 6.5l5-.5L8 1.5z"
+                stroke="currentColor" stroke-width="1.3"
+                stroke-linejoin="round" fill="none"/>
+        </svg>
+        <span>Mark as Icon</span>
+      </div>
+      <div class="ctx-item disabled" data-mark-action="image" title="Coming soon">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+          <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor"
+                stroke-width="1.3" fill="none"/>
+          <circle cx="6" cy="7" r="1.2" stroke="currentColor" stroke-width="1.3"/>
+          <path d="M2.5 12l3-3 3 2.5 2-2 3 3" stroke="currentColor" stroke-width="1.3"
+                stroke-linejoin="round" fill="none"/>
+        </svg>
+        <span>Mark as Image</span>
+        <span class="ctx-coming">soon</span>
+      </div>
+      <div class="ctx-item disabled" data-mark-action="ellipse" title="Coming soon">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+          <ellipse cx="8" cy="8" rx="6" ry="4.5" stroke="currentColor"
+                   stroke-width="1.3" fill="none"/>
+        </svg>
+        <span>Mark as Ellipse</span>
+        <span class="ctx-coming">soon</span>
+      </div>
+      <div class="ctx-item disabled" data-mark-action="vectorNetwork" title="Coming soon">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+          <path d="M3 12l5-8 5 8" stroke="currentColor" stroke-width="1.3"
+                stroke-linejoin="round" fill="none"/>
+          <circle cx="3" cy="12" r="1.2" fill="currentColor"/>
+          <circle cx="13" cy="12" r="1.2" fill="currentColor"/>
+          <circle cx="8" cy="4" r="1.2" fill="currentColor"/>
+        </svg>
+        <span>Mark as Vector Network</span>
+        <span class="ctx-coming">soon</span>
+      </div>
+    </div>
+
+    <!-- "Mark as Icon" modal. Mirrors the layout shown in the spec
+         screenshot: node label, icon name input, export path input, info
+         card explaining what marking does, Cancel + Mark/Update buttons,
+         plus an Unmark button (left-aligned) when the node already has
+         an icon mark stored. -->
+    <div id="icon-modal" class="modal-overlay" hidden>
+      <div class="modal">
+        <div class="modal-header">
+          <div class="modal-header-icon" id="icon-modal-header-icon">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M8 1.5l2 4.5 5 .5-3.8 3.4 1.1 5.1L8 12.4 3.7 15l1.1-5.1L1 6.5l5-.5L8 1.5z"
+                    stroke="currentColor" stroke-width="1.6"
+                    stroke-linejoin="round" fill="none"/>
+            </svg>
+          </div>
+          <div class="modal-header-text">
+            <div class="modal-title" id="icon-modal-title">Mark as Icon</div>
+            <div class="modal-sub">Cut children, export as SVG, add to Icons</div>
+          </div>
+          <button class="modal-close" id="icon-modal-close" title="Close">×</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="icon-modal-node">
+            <div class="icon-modal-node-label">Node to mark as icon:</div>
+            <div class="icon-modal-node-name" id="icon-modal-node-name">—</div>
+          </div>
+
+          <div class="form-field">
+            <label>Icon Name <span class="req">*</span></label>
+            <input id="icon-modal-name" type="text"
+                   placeholder="tooltip-arrow" autocomplete="off" />
+            <div class="help">
+              A descriptive name for the icon (lowercase, hyphens allowed)
+            </div>
+          </div>
+
+          <div class="form-field">
+            <label>Export Path</label>
+            <input id="icon-modal-path" type="text"
+                   placeholder="icons/tooltip-arrow.svg" autocomplete="off" />
+            <div class="help">
+              File path where the icon will be exported (relative to project root)
+            </div>
+          </div>
+
+          <div class="icon-modal-info">
+            <div class="info-title">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="6.5" stroke="currentColor"
+                        stroke-width="1.3" fill="none"/>
+                <path d="M8 7.5v3.5M8 5.2v.1" stroke="currentColor"
+                      stroke-width="1.6" stroke-linecap="round"/>
+              </svg>
+              Marking this node as an icon will:
+            </div>
+            <ul>
+              <li>Export it as an SVG file</li>
+              <li>Cut its children in compressed specs</li>
+              <li>Add it to the Icons collection tab</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button id="icon-modal-unmark" class="btn-danger" hidden>Unmark</button>
+          <button id="icon-modal-cancel" class="btn btn-secondary">Cancel</button>
+          <button id="icon-modal-confirm" class="modal-primary">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+              <path d="M3.5 8.5l3 3 6-6" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span id="icon-modal-confirm-label">Mark as Icon</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
     <script src="ui.js"></script>
   </body>
 </html>

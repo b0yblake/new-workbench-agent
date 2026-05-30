@@ -1,4 +1,4 @@
-# Figma to VS Code Sender
+# Figma Clarity
 
 MVP Figma plugin that scans the currently selected Figma node and ships its
 design spec to a local VS Code extension via WebSocket
@@ -46,7 +46,7 @@ Outputs to `dist/`:
 1. Open **Figma Desktop**.
 2. Menu: **Plugins → Development → Import plugin from manifest…**
 3. Pick `figma-to-vscode-plugin/manifest.json`.
-4. Run from **Plugins → Development → Figma to VS Code Sender**.
+4. Run from **Plugins → Development → Figma Clarity**.
 
 ## Use
 
